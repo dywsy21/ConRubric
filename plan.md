@@ -1,28 +1,32 @@
-# Project Plan: Meta-Reward Rubric Generator
+# Project Plan: Meta-Reward GRM Training
 
 ## 1. Overview
 
-**Goal**: Train a specialized Large Language Model (Rubric Generator) to generate high-quality evaluation rubrics that guide downstream models (Solvers) to produce robust, high-quality answers.
+**Goal**: Train a specialized **General Reward Model (GRM)** that generates high-quality evaluation rubrics (Principles) to guide downstream models (Solvers) and provides accurate pointwise scoring.
 
-**Core Hypothesis**: A "good" rubric is one that, when used to guide a solver, results in an answer that scores highly across *all possible* valid rubrics (approximated by a set of orthogonal "Anchor Rubrics").
+**Core Hypothesis**: A "good" rubric is one that, when used to guide a solver, results in an answer that scores highly across *all possible* valid rubrics. By training a GRM to generate these "good" rubrics, we simultaneously enhance its reasoning and evaluation capabilities.
 
-**Methodology**: Bi-level optimization using Reinforcement Learning (RL), where the Rubric Generator is the policy and the Frozen Solver is part of the environment.
+**Methodology**: Bi-level optimization using Reinforcement Learning (DAPO), where the GRM (Policy) generates rubrics and the Frozen Solver (Environment) generates answers.
 
-## 2. Architecture & Components (during RL-ing of the Rubric Generator)
+## 2. Architecture & Components (during RL-ing of the GRM)
 
 ### 2.1. Models
 
-*   **Rubric Generator (Policy)**:
-    *   Role: Generates a rubric $r$ given a question $q$.
-    *   Base Model: Llama-3-8B-Instruct or similar mid-sized model.
-    *   Status: Trainable (SFT -> RL).
+*   **General Reward Model (GRM) / Rubric Generator**:
+    *   **Type**: Pointwise, Generative Reward Model.
+    *   **Architecture**: Single model that outputs `Principle (Rubric) -> Critique -> Score`.
+    *   **Role**:
+        1.  **Generator**: Generates `Principle` (Rubric) $r$ given question $q$.
+        2.  **Evaluator**: Generates `Critique` and `Score` given $(q, a, r)$.
+    *   **Base Model**: qwen3-4B-instruct
+    *   **Status**: Trainable (SFT -> RFT -> RL).
 *   **Solver (Environment)**:
     *   Role: Generates answer $a$ given question $q$ and rubric $r$.
     *   Base Model: Qwen-2.5-7B-Instruct or similar capable model. (maybe alternate between a set of different models?)
     *   Status: **Frozen** (Parameters fixed).
-*   **Oracle / Judge (Reward Model)**:
-    *   Role: Evaluates answer $a$ against a set of Anchor Rubrics.
-    *   Model: The current most powerful model.
+*   **Oracle / Judge (Ground Truth)**:
+    *   Role: Evaluates answer $a$ against a set of Anchor Rubrics to provide the "Meta-Reward".
+    *   Model: The current most powerful model (e.g., GPT-4o, DeepSeek-V3).
 
 ### 2.2. The Meta-Reward Function
 
@@ -38,8 +42,8 @@ To approximate "all possible rubrics", we define a set of **Anchor Rubrics** ($\
 For a generated rubric $r$:
 1.  **Simulate RL Step (Inner Loop with DAPO)**:
     *   Generate rollouts $a \sim \pi_{solver}(\cdot|q)$.
-    *   Score rollouts using rubric $r$ to obtain proxy rewards $R_{proxy}$.
-    *   **Simulate DAPO Update**: Perform a simulated policy update $\pi_{solver} \to \pi'_{solver}$ using the **DAPO** algorithm (utilizing Decoupled Clipping and Dynamic Sampling) to maximize $R_{proxy}$.
+    *   Score rollouts using rubric $r$ and the current GRM to obtain proxy rewards $R_{proxy}$.
+    *   **Simulate DAPO Update**: Perform $N_{step}$ simulated policy updates $\pi_{solver} \to \pi'_{solver}$ using the **DAPO** algorithm (utilizing Decoupled Clipping and Dynamic Sampling) to maximize $R_{proxy}$.
 2.  **Evaluate Improvement**:
     *   Measure the performance of the updated policy $\pi'_{solver}$ using the **Anchor Rubrics** (Ground Truth).
 3.  **Meta-Reward**:
@@ -62,52 +66,59 @@ Why measure *Solver Improvement* instead of directly evaluating the generated ru
 
 ## 3. Implementation Roadmap
 
-### Phase 1: Data Preparation & Cold Start (SFT): Distilling + Existing High Quality (Question, Rubric) Pairs
+### Phase 1: Data Preparation & Cold Start (SFT + RFT)
 
-**Objective**: Create a high-quality dataset to initialize the Rubric Generator.
+**Objective**: Create a high-quality dataset to initialize the GRM using Distillation and Rejective Fine-Tuning (RFT).
+
 1.  **Dataset Selection**:
-    *   Focus on objective reasoning tasks: MATH (Mathematics), MBPP/HumanEval (Coding), ...
+    *   Focus on open tasks that essentially don't have "golden truths". (e.g., creative writing, role playing, etc.)
     *   Select ~5k-10k high-quality samples `(Question, Gold Answer)`.
 2.  **Reverse Engineering (Synthetic Data)**:
     *   Use Oracle to "reverse engineer" the rubric that would lead to the Gold Answer.
-    *   Prompt: "Given this Question and this perfect Answer, write the detailed Rubric that would guide a model to produce exactly this output."
     *   Output: `(Question, Gold Rubric)` pairs.
 3.  **SFT Training**:
-    *   Fine-tune the Rubric Generator on `(Question, Gold Rubric)`.
-    *   Goal: Ensure the model understands the format and style of rubrics.
+    *   Fine-tune the GRM on `(Question, Gold Rubric)`.
+4.  **Rejective Fine-Tuning (RFT)**:
+    *   Generate $N$ candidate rubrics for each question using the SFT-ed model.
+    *   **Filter**:
+        *   Use Solver to generate answers for each rubric.
+        *   Score answers using Oracle.
+        *   Keep rubrics that lead to high-quality answers (matching Gold Answer performance).
+    *   **Train**: Fine-tune on the filtered high-quality `(Question, Rubric)` pairs.
 
 ### Phase 2: Reinforcement Learning (RL)
 
-**Objective**: Optimize the Generator to maximize the Meta-Reward.
+**Objective**: Optimize the GRM to maximize the Meta-Reward using **verl** and **DAPO**.
 
-1.  **Framework**: Use **verl** (VolcEngine Reinforcement Learning), a scalable RL framework for LLMs.
-2.  **Algorithm**: **DAPO** (Direct Alignment Policy Optimization) is selected over GRPO for its superior sample efficiency and stability in reasoning tasks.
+1.  **Framework**: **verl** (VolcEngine Reinforcement Learning).
+2.  **Algorithm**: **DAPO** (Direct Alignment Policy Optimization).
 3.  **Key DAPO Configuration**:
-    *   **Decoupled Clipping**: Use asymmetric clipping ratios (e.g., `clip_ratio_low: 0.2`, `clip_ratio_high: 0.28`) to stabilize updates.
-    *   **Dynamic Sampling**: Enable `filter_groups` to ensure each training batch contains a mix of high and low-scoring samples, avoiding uninformative updates.
-    *   **Token-level Loss**: Use `loss_agg_mode: "token-mean"` for more granular learning signals.
+    *   **Decoupled Clipping**: Asymmetric clipping ratios.
+    *   **Dynamic Sampling**: Enable `filter_groups` to ensure contrastive batches.
+    *   **Token-level Loss**: `loss_agg_mode: "token-mean"`.
 4.  **Training Loop (Bi-Level DAPO)**:
-    *   **Outer Rollout (Generator)**:
+    *   **Outer Rollout (GRM Policy)**:
         *   Sample batch of questions $q$.
-        *   Generator produces rubrics $\{r_1, ..., r_k\}$.
-    *   **Inner Loop Simulation (Meta-Reward Calculation)**:
+        *   GRM generates rubrics (Principles) $\{r_1, ..., r_k\}$ for each $q$.
+    *   **Inner Loop DAPO Simulation (Meta-Reward Calculation)**:
         *   For each rubric $r_i$:
-            *   **Inner Rollout**: Solver produces answers $A_{pre}$ guided by $r_i$.
-            *   **Inner DAPO Update**: Simulate update $\pi_{solver} \to \pi'_{solver}$ using DAPO on $A_{pre}$.
-            *   **Measure Improvement**: Evaluate $\pi'_{solver}$ vs $\pi_{solver}$ on Anchor Rubrics to get Meta-Reward $R_i$.
-    *   **Outer Update (Generator)**:
-        *   Update Generator parameters using **DAPO** (with Decoupled Clipping & Dynamic Sampling) based on Meta-Rewards $\{R_1, ..., R_k\}$.
+            *   **Data Collection**: Frozen Solver $\pi_{solver}$ generates a batch of answers $A$ for $q$.
+            *   **Proxy Scoring**: GRM evaluates $A$ using rubric $r_i$, producing scores $S_{proxy}$.
+            *   **Inner DAPO Step**: Simulate $N_{step}$ policy updates $\pi_{solver} \to \pi'_{solver}$ using **DAPO** to maximize $S_{proxy}$.
+            *   **Meta-Evaluation**: Evaluate the performance of the updated policy $\pi'_{solver}$ (e.g., by scoring its outputs) against the **Anchor Rubrics** (Oracle).
+            *   **Reward Assignment**: The improvement in Anchor Score (or absolute Anchor Score of $\pi'_{solver}$) becomes the Meta-Reward $R_i$ for rubric $r_i$.
+    *   **Outer Update (GRM Policy)**:
+        *   Update GRM parameters using **DAPO** (with Decoupled Clipping & Dynamic Sampling) to maximize the expected Meta-Reward, treating $\{r_1, ..., r_k\}$ as the rollout and $\{R_1, ..., R_k\}$ as the rewards.
 
 ### Phase 3: Evaluation & Analysis
 
 1.  **Baselines**:
-    *   **Zero-shot**: Solver prompted with "You are a helpful assistant."
-    *   **Generic Rubric**: Solver prompted with a static, hand-crafted rubric.
-    *   **Self-Refine**: Standard self-correction loop.
+    *   Zero-shot, Generic Rubric, Self-Refine.
 2.  **Metrics**:
-    *   **Downstream Accuracy**: Pass@1 on MATH/HumanEval using the generated rubrics.
-    *   **Rubric Quality**: Human evaluation of the generated rubrics (intelligibility, specificity).
-    *   **Transferability**: Test if rubrics generated for one Solver work for another (e.g., Llama-generated rubric guiding a Mistral Solver).
+    *   **Downstream Accuracy**: Pass@1 on MATH/HumanEval.
+    *   **RM Benchmarks**: Evaluate the GRM's scoring capability on **RewardBench**, **PPE Preference**, **PPE Correctness**, and **RMB**.
+    *   **Inference-time Scaling**: Test if Voting with Generated Rewards (using GRM scores) improves performance.
+    *   **Rubric Quality**: Human evaluation. (maybe not needed)
 
 ## 4. Key Technical Challenges & Mitigations
 
