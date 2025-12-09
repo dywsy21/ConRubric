@@ -143,6 +143,6 @@ We will use **verl** (VolcEngine Reinforcement Learning).
     1.  Takes the generated rubric $r$.
     2.  **Simulate Inner DAPO**:
         *   Generate initial answers $A_{pre}$ from the Frozen Solver guided by $r$.
-        *   Perform a simulated DAPO update to obtain $\pi'_{solver}$.
+        *   Perform $N_step$ simulated DAPO updates to obtain $\pi'_{solver}$.
     3.  **Validation**: Generate answers $A_{post}$ from $\pi'_{solver}$ and score them against Anchor Rubrics.
     4.  Returns the performance improvement (Meta-Reward) to the Outer Generator.
