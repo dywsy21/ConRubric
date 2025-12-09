@@ -70,14 +70,3 @@ Output JSON:
     "reasoning": "<brief explanation>"
 }}
 """
-
-Output JSON:
-{{
-    "correctness": <score>,
-    "clarity": <score>,
-    "completeness": <score>,
-    "safety": <score>,
-    "overall": <score>,
-    "reasoning": "<brief explanation>"
-}}
-"""

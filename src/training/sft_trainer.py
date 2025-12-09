@@ -1,6 +1,11 @@
 import os
 import json
 import torch
+from dotenv import load_dotenv
+
+# Load environment variables before importing Transformers
+load_dotenv()
+
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForSeq2Seq
 from src.config import ProjectConfig

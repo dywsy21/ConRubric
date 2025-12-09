@@ -6,7 +6,9 @@ from src.evaluation.judge import Oracle
 from src.models.solver import Solver
 
 class MetaRewardFunction:
-    def __init__(self, solver_model_name: str, oracle_model_name: str, oracle_api_key: str = None, oracle_api_base: str = None):
+    def __init__(self, solver_model_name: str, oracle_model_name: str, 
+                 oracle_api_key: str = None, oracle_api_base: str = None,
+                 solver_remote: bool = False, solver_api_key: str = None, solver_api_base: str = None):
         self.solver_model_name = solver_model_name
         self.oracle = Oracle(
             model_name=oracle_model_name,
@@ -15,7 +17,12 @@ class MetaRewardFunction:
         )
         # Initialize Solver
         # Note: In a distributed setting (Ray/Verl), this might need to be handled differently (e.g. as an Actor)
-        self.solver = Solver(model_name=solver_model_name)
+        self.solver = Solver(
+            model_name=solver_model_name,
+            is_remote=solver_remote,
+            api_key=solver_api_key,
+            api_base=solver_api_base
+        )
         
     def compute_reward(self, questions: List[str], rubrics: List[str]) -> torch.Tensor:
         """
@@ -49,8 +56,9 @@ class MetaRewardFunction:
                 for idx, r in zip(indices, current_rubrics):
                     # Fallback: Generate answer and eval against Anchor Rubrics (old method)
                     ans = self.solver.generate_answer(q, r)
-                    eval_res = self.oracle.evaluate_answer(q, ans) # Uses Anchor Rubrics
-                    rewards[idx] = float(eval_res.get("overall", 0.0))
+                    # evaluate_answer now returns a float directly
+                    score = self.oracle.evaluate_answer(q, ans) 
+                    rewards[idx] = score
                 continue
 
             # 1. Generate Answers
@@ -67,8 +75,8 @@ class MetaRewardFunction:
                         continue # Skip self-evaluation for consensus score (optional)
                     
                     # Evaluate Answer i against Rubric j
-                    eval_res = self.oracle.evaluate_answer(q, answers[i], rubric=current_rubrics[j])
-                    score = float(eval_res.get("score", 0.0))
+                    # evaluate_answer now returns a float directly
+                    score = self.oracle.evaluate_answer(q, answers[i], rubric=current_rubrics[j])
                     score_matrix[i][j] = score
             
             # 3. Compute Rewards

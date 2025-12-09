@@ -1,6 +1,11 @@
 import os
 import ray
 import tyro
+from dotenv import load_dotenv
+
+# Load environment variables before importing other modules
+load_dotenv()
+
 from src.config import RLConfig, ProjectConfig
 from src.training.meta_reward import MetaRewardFunction
 
@@ -25,7 +30,10 @@ def train_rl():
         solver_model_name=project_config.solver_model_name,
         oracle_model_name=project_config.oracle_model_name,
         oracle_api_key=project_config.oracle_api_key,
-        oracle_api_base=project_config.oracle_api_base
+        oracle_api_base=project_config.oracle_api_base,
+        solver_remote=project_config.solver_remote,
+        solver_api_key=project_config.solver_api_key,
+        solver_api_base=project_config.solver_api_base
     )
     
     print("Meta-Reward Function initialized.")

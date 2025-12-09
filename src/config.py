@@ -30,6 +30,11 @@ class ProjectConfig:
     ]))
     solver_model_name: str = os.getenv("SOLVER_MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct") # Default/Active solver
     
+    # Solver Remote Configuration
+    solver_remote: bool = os.getenv("SOLVER_REMOTE", "False").lower() == "true"
+    solver_api_key: Optional[str] = os.getenv("SOLVER_API_KEY")
+    solver_api_base: Optional[str] = os.getenv("SOLVER_API_BASE")
+    
     # Oracle / Judge
     oracle_model_name: str = os.getenv("ORACLE_MODEL_NAME", "gpt-4o")
     oracle_api_key: Optional[str] = os.getenv("ORACLE_API_KEY")

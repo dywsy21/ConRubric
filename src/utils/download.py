@@ -1,5 +1,10 @@
 import os
 import argparse
+from dotenv import load_dotenv
+
+# Load environment variables before importing Hugging Face libraries
+load_dotenv()
+
 from huggingface_hub import snapshot_download
 from datasets import load_dataset
 from src.config import ProjectConfig, DataConfig

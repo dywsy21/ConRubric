@@ -77,6 +77,17 @@ For a given question $q$:
     *   **Reward**: Compute $R_i$ for each $r_i$.
     *   **Update**: Update GRM policy to maximize $R_i$.
 
+### Phase 3: Evaluation & Analysis
+
+1.  **Baselines**:
+    *   Zero-shot, Generic Rubric, Self-Refine.
+2.  **Metrics**:
+    *   **Downstream Accuracy**: Pass@1 on MATH/HumanEval.
+    *   **RM Benchmarks**: Evaluate the GRM's scoring capability on **RewardBench**, **PPE Preference**, **PPE Correctness**, and **RMB**.
+    *   **Inference-time Scaling**: Test if Voting with Generated Rewards (using GRM scores) improves performance.
+    *   **Rubric Quality**: Human evaluation. (maybe not needed)
+
+
 ## 4. Key Technical Considerations
 
 *   **Computational Cost**:

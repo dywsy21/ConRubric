@@ -5,7 +5,7 @@ from typing import List, Dict, Any
 from openai import OpenAI
 from src.utils.prompts import REVERSE_ENGINEER_RUBRIC_PROMPT, ANCHOR_EVALUATION_PROMPT, DYNAMIC_RUBRIC_EVALUATION_PROMPT
 
-class Oracle:
+class Judge:
     def __init__(self, model_name: str = "gpt-4o", api_key: str = None, api_base: str = None):
         self.model_name = model_name
         self.client = OpenAI(
@@ -22,7 +22,7 @@ class Oracle:
             )
             return response.choices[0].message.content
         except Exception as e:
-            print(f"Error calling Oracle API: {e}")
+            print(f"Error calling Judge API: {e}")
             return ""
 
     def reverse_engineer_rubric(self, question: str, gold_answer: str) -> List[str]:
@@ -49,7 +49,10 @@ class Oracle:
             print(f"Error parsing rubric: {e}")
             return []
 
-    def evaluate_answer(self, question: str, answer: str, rubric: str = None) -> Dict[str, Any]:
+    def evaluate_answer(self, question: str, answer: str, rubric: str = None) -> float:
+        """
+        Evaluates an answer and returns a scalar score (0-10).
+        """
         if rubric:
             prompt = DYNAMIC_RUBRIC_EVALUATION_PROMPT.format(question=question, answer=answer, rubric=rubric)
         else:
@@ -63,10 +66,38 @@ class Oracle:
             end = response_text.rfind('}') + 1
             if start != -1 and end != -1:
                 json_str = response_text[start:end]
-                return json.loads(json_str)
+                result = json.loads(json_str)
+                
+                # Handle both formats
+                if "score" in result:
+                    return float(result["score"])
+                elif "overall" in result:
+                    return float(result["overall"])
+                else:
+                    print("No score found in JSON")
+                    return 0.0
             else:
                 print("Could not find JSON in evaluation response")
-                return {}
+                return 0.0
         except Exception as e:
             print(f"Error parsing evaluation: {e}")
-            return {}
+            return 0.0
+
+    def check_correctness(self, question: str, answer: str, gold: str) -> bool:
+        """
+        Checks if the answer is correct relative to the gold solution.
+        """
+        prompt = f"""You are a math grader.
+Problem: {question}
+Gold Solution: {gold}
+
+Student Answer: {answer}
+
+Is the Student Answer correct according to the Gold Solution? 
+Respond with only "YES" or "NO".
+"""
+        response = self._call_api(prompt, temperature=0.0).strip().upper()
+        return "YES" in response
+
+# Alias for backward compatibility if needed, though we changed the class name
+Oracle = Judge
