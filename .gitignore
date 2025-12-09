@@ -4,3 +4,4 @@ refs
 **/*.pyc
 data
 .env
+uv.lock

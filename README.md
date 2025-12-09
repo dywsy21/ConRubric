@@ -22,7 +22,7 @@ cp .env.example .env
 Download all required models and datasets to the local cache.
 
 ```bash
-uv python -m src.utils.download
+uv run python -m src.utils.download
 ```
 
 ## Usage
@@ -32,7 +32,7 @@ uv python -m src.utils.download
 1.  **Generate Synthetic Data (Reverse Engineering)**:
 
 ```bash
-uv python -m src.data.generate_synthetic --limit 100
+uv run python -m src.data.generate_synthetic --limit 100
 ```
 
 This will generate `data/synthetic_rubrics.jsonl`.
@@ -40,7 +40,7 @@ This will generate `data/synthetic_rubrics.jsonl`.
 2.  **SFT Training**:
 
 ```bash
-uv python -m src.training.sft_trainer
+uv run python -m src.training.sft_trainer
 ```
 
 This will fine-tune the GRM on the synthetic rubrics.
@@ -50,7 +50,7 @@ This will fine-tune the GRM on the synthetic rubrics.
 1.  **Run RL Training**:
 
 ```bash
-uv python -m src.training.rl_trainer
+uv run python -m src.training.rl_trainer
 ```
 
 This will start the RL loop using `verl` (requires `verl` to be installed).

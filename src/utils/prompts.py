@@ -48,3 +48,36 @@ Output JSON:
     "reasoning": "<brief explanation>"
 }}
 """
+
+DYNAMIC_RUBRIC_EVALUATION_PROMPT = """
+You are an expert judge. Evaluate the following Answer to the Question based strictly on the provided Rubric.
+
+Question:
+{question}
+
+Answer:
+{answer}
+
+Rubric:
+{rubric}
+
+Please evaluate how well the answer satisfies the criteria in the Rubric.
+Provide a score from 0 to 10, where 0 is complete failure and 10 is perfect adherence.
+
+Output JSON:
+{{
+    "score": <score>,
+    "reasoning": "<brief explanation>"
+}}
+"""
+
+Output JSON:
+{{
+    "correctness": <score>,
+    "clarity": <score>,
+    "completeness": <score>,
+    "safety": <score>,
+    "overall": <score>,
+    "reasoning": "<brief explanation>"
+}}
+"""

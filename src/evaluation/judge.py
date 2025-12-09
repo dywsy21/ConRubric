@@ -3,7 +3,7 @@ import json
 import time
 from typing import List, Dict, Any
 from openai import OpenAI
-from src.utils.prompts import REVERSE_ENGINEER_RUBRIC_PROMPT, ANCHOR_EVALUATION_PROMPT
+from src.utils.prompts import REVERSE_ENGINEER_RUBRIC_PROMPT, ANCHOR_EVALUATION_PROMPT, DYNAMIC_RUBRIC_EVALUATION_PROMPT
 
 class Oracle:
     def __init__(self, model_name: str = "gpt-4o", api_key: str = None, api_base: str = None):
@@ -49,8 +49,12 @@ class Oracle:
             print(f"Error parsing rubric: {e}")
             return []
 
-    def evaluate_answer(self, question: str, answer: str) -> Dict[str, Any]:
-        prompt = ANCHOR_EVALUATION_PROMPT.format(question=question, answer=answer)
+    def evaluate_answer(self, question: str, answer: str, rubric: str = None) -> Dict[str, Any]:
+        if rubric:
+            prompt = DYNAMIC_RUBRIC_EVALUATION_PROMPT.format(question=question, answer=answer, rubric=rubric)
+        else:
+            prompt = ANCHOR_EVALUATION_PROMPT.format(question=question, answer=answer)
+            
         response_text = self._call_api(prompt, temperature=0.0)
         
         try:

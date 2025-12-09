@@ -20,6 +20,7 @@ def train_rl():
         
     # Initialize Meta-Reward Function
     # This will be used inside the training loop to score the generated rubrics
+    # Note: In a real distributed setup, this object might need to be wrapped or instantiated on workers
     reward_fn = MetaRewardFunction(
         solver_model_name=project_config.solver_model_name,
         oracle_model_name=project_config.oracle_model_name,
@@ -29,6 +30,7 @@ def train_rl():
     
     print("Meta-Reward Function initialized.")
     print("Ready to start training loop (waiting for verl installation).")
+    print("NOTE: Ensure that the RL configuration generates multiple samples (N > 1) per prompt to enable Consensus-Based Meta-Reward.")
     
     # TODO: Integrate with verl's training loop
     # 1. Setup Rollout Workers (GRM Policy)
