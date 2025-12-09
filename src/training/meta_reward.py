@@ -9,20 +9,48 @@ class MetaRewardFunction:
     def __init__(self, solver_model_name: str, oracle_model_name: str, 
                  oracle_api_key: str = None, oracle_api_base: str = None,
                  solver_remote: bool = False, solver_api_key: str = None, solver_api_base: str = None):
-        self.solver_model_name = solver_model_name
-        self.oracle = Oracle(
-            model_name=oracle_model_name,
-            api_key=oracle_api_key,
-            api_base=oracle_api_base
-        )
-        # Initialize Solver
-        # Note: In a distributed setting (Ray/Verl), this might need to be handled differently (e.g. as an Actor)
-        self.solver = Solver(
-            model_name=solver_model_name,
-            is_remote=solver_remote,
-            api_key=solver_api_key,
-            api_base=solver_api_base
-        )
+        self.config = {
+            "solver_model_name": solver_model_name,
+            "oracle_model_name": oracle_model_name,
+            "oracle_api_key": oracle_api_key,
+            "oracle_api_base": oracle_api_base,
+            "solver_remote": solver_remote,
+            "solver_api_key": solver_api_key,
+            "solver_api_base": solver_api_base
+        }
+        self._oracle = None
+        self._solver = None
+
+    @property
+    def oracle(self):
+        if self._oracle is None:
+            self._oracle = Oracle(
+                model_name=self.config["oracle_model_name"],
+                api_key=self.config["oracle_api_key"],
+                api_base=self.config["oracle_api_base"]
+            )
+        return self._oracle
+
+    @property
+    def solver(self):
+        if self._solver is None:
+            self._solver = Solver(
+                model_name=self.config["solver_model_name"],
+                is_remote=self.config["solver_remote"],
+                api_key=self.config["solver_api_key"],
+                api_base=self.config["solver_api_base"]
+            )
+        return self._solver
+        
+    def __getstate__(self):
+        # When pickling, don't include the client objects
+        state = self.__dict__.copy()
+        state["_oracle"] = None
+        state["_solver"] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
         
     def compute_reward(self, questions: List[str], rubrics: List[str]) -> torch.Tensor:
         """

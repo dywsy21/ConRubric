@@ -7,6 +7,8 @@ This project implements the training of a General Reward Model (GRM) using Meta-
 1.  **Install Dependencies**:
 
 ```bash
+# install cuda 12.9 first, make sure nvcc, etc. are on the PATH
+uv venv
 uv pip install .
 ```
 
@@ -32,7 +34,7 @@ uv run python -m src.utils.download
 1.  **Generate Synthetic Data (Reverse Engineering)**:
 
 ```bash
-uv run python -m src.data.generate_synthetic --limit 100
+uv run python -m src.data.generate_synthetic --limit <N>  # Limit to N samples per dataset
 ```
 
 This will generate `data/synthetic_rubrics.jsonl`.
@@ -55,9 +57,8 @@ uv run python -m src.training.rl_trainer
 
 This will start the RL loop using `verl` (requires `verl` to be installed).
 
-## Project Structure
+## Benchmark
 
-*   `src/data`: Data processing and generation.
-*   `src/evaluation`: Oracle and Judge implementations.
-*   `src/training`: SFT and RL training scripts.
-*   `src/utils`: Utility functions and prompts.
+```bash
+uv run python -m src.evaluation.run_benchmark --model_path <path_to_grm> --benchmarks rewardbench ppe rmb
+```

@@ -20,6 +20,7 @@ dependencies = [
     "tqdm",
     "python-dotenv",
     "huggingface_hub",
+    "flash-attn"
 ]
 
 [build-system]
@@ -29,6 +30,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 
-[tool.uv]
-# Optional: specific sources if verl needs to be installed from git
-# sources = { verl = { git = "https://github.com/volcengine/verl.git" } }
+[tool.uv.sources]
+verl = { git = "https://github.com/volcengine/verl.git" }
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" }
+
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch"]

@@ -5,3 +5,6 @@ refs
 data
 .env
 uv.lock
+wandb
+outputs
+output

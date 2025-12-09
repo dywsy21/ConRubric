@@ -37,13 +37,27 @@ def train_rl():
     )
     
     print("Meta-Reward Function initialized.")
-    print("Ready to start training loop (waiting for verl installation).")
+    print("Starting verl training loop...")
     print("NOTE: Ensure that the RL configuration generates multiple samples (N > 1) per prompt to enable Consensus-Based Meta-Reward.")
     
-    # TODO: Integrate with verl's training loop
-    # 1. Setup Rollout Workers (GRM Policy)
-    # 2. Setup Reward Workers (MetaRewardFunction)
-    # 3. Start DAPO/PPO optimization
+    # Run the verl training script
+    # We use subprocess to ensure clean environment and hydra configuration handling
+    import subprocess
+    import sys
+    
+    cmd = [
+        sys.executable, 
+        "-m", "src.training.verl_main",
+        # Pass any overrides here if needed, e.g.
+        # "trainer.project_name=meta-reward-grm"
+    ]
+    
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Training failed with error: {e}")
+    except KeyboardInterrupt:
+        print("Training interrupted.")
     
 if __name__ == "__main__":
     train_rl()
