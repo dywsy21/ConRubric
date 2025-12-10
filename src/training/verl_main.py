@@ -74,6 +74,7 @@ class MetaRewardManager:
         
         prompts_list = []
         responses_list = []
+        response_lengths = []
         
         # We need to extract valid tokens based on attention mask or just decode
         for i in range(len(data)):
@@ -83,11 +84,11 @@ class MetaRewardManager:
             
             response_ids = data_item.batch['responses']
             # response_ids might contain padding
-            valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
+            valid_response_length = int(data_item.batch['attention_mask'][prompt_length:].sum().item())
             valid_response_ids = response_ids[:valid_response_length]
             
             # prompt_ids might be padded too
-            valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
+            valid_prompt_length = int(data_item.batch['attention_mask'][:prompt_length].sum().item())
             valid_prompt_ids = prompt_ids[-valid_prompt_length:]
             
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
@@ -95,14 +96,26 @@ class MetaRewardManager:
             
             prompts_list.append(prompt_str)
             responses_list.append(response_str)
+            response_lengths.append(response_ids.shape[-1])  # Full response length including padding
             
         # Compute rewards
         # MetaRewardFunction expects list of questions and rubrics (responses)
-        rewards_tensor = self.reward_fn.compute_reward(prompts_list, responses_list)
+        scalar_rewards = self.reward_fn.compute_reward(prompts_list, responses_list)
+        
+        # Convert to token-level rewards: put the scalar reward at the last token of each response
+        # verl expects shape (batch_size, response_length)
+        batch_size = len(data)
+        max_response_length = max(response_lengths)
+        
+        # Create token-level rewards tensor (reward only at final token)
+        token_level_rewards = torch.zeros(batch_size, max_response_length, dtype=torch.float32)
+        for i in range(batch_size):
+            # Put reward at the last position of response
+            token_level_rewards[i, response_lengths[i] - 1] = scalar_rewards[i]
         
         if return_dict:
-            return {'reward_tensor': rewards_tensor}
-        return rewards_tensor
+            return {'reward_tensor': token_level_rewards}
+        return token_level_rewards
 
 def create_rl_dataset(data_paths, data_config, tokenizer, processor):
     """Create a dataset."""
