@@ -7,7 +7,11 @@ defaults:
   - _self_
 
 global_profiler:
+  _target_: verl.utils.profiler.ProfilerConfig
+  tool: null
   steps: null
+  profile_continuous_steps: false
+  save_path: "outputs/profile"
 
 # Algorithm settings for GRPO
 algorithm:
@@ -226,8 +230,10 @@ critic:
 
 reward_model:
   enable: False
+  launch_reward_fn_async: false
 
 trainer:
+  balance_batch: true
   total_epochs: 1
   total_training_steps: 2
   project_name: grm-grpo
