@@ -37,7 +37,7 @@ actor_rollout_ref:
   hybrid_engine: true
   model:
     _target_: verl.workers.config.HFModelConfig
-    path: /home/wsy/GRM/data/hub/models--Qwen--Qwen2.5-7B-Instruct/snapshots/a09a35458c702b33eeacc393d103063234e8bc28
+    path: Qwen/Qwen3-4B-Instruct-2507
     custom_chat_template: null
     use_shm: false
     external_lib: null
@@ -189,7 +189,7 @@ critic:
     weight_decay: 0.01
   model:
     _target_: verl.workers.config.critic.FSDPCriticModelCfg
-    path: /home/wsy/GRM/data/hub/models--Qwen--Qwen2.5-7B-Instruct/snapshots/a09a35458c702b33eeacc393d103063234e8bc28
+    path: Qwen/Qwen3-4B-Instruct-2507
     use_shm: False
     tokenizer_path: ${actor_rollout_ref.model.path}
     override_config: { }
@@ -208,6 +208,8 @@ critic:
         min_num_params: 0
       fsdp_size: -1
       forward_prefetch: False
+      model_dtype: bfloat16
+      dtype: bfloat16
     lora_rank: 0
     lora_alpha: 16
     target_modules: all-linear

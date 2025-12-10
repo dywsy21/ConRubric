@@ -5,7 +5,7 @@ description = "Meta-Reward General Reward Model Training"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.1.0",
+    "torch==2.5.1",
     "transformers>=4.36.0",
     "datasets>=2.14.0",
     "accelerate>=0.25.0",
@@ -20,7 +20,8 @@ dependencies = [
     "tqdm",
     "python-dotenv",
     "huggingface_hub",
-    "flash-attn"
+    "flash-attn",
+    "trl"
 ]
 
 [build-system]
@@ -32,7 +33,7 @@ packages = ["src"]
 
 [tool.uv.sources]
 verl = { git = "https://github.com/volcengine/verl.git" }
-flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" }
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.0.post2/flash_attn-2.7.0.post2+cu12torch2.5cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" }
 
 [tool.uv.extra-build-dependencies]
 flash-attn = ["torch"]

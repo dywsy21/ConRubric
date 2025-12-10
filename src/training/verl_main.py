@@ -7,8 +7,15 @@ import numpy as np
 from omegaconf import DictConfig, OmegaConf, ListConfig
 from dotenv import load_dotenv
 
-# Load env vars
+# Load env vars BEFORE any other imports that might use them
 load_dotenv()
+
+# Set HF_HOME to absolute path if relative
+hf_home = os.getenv("HF_HOME", "./data")
+if not os.path.isabs(hf_home):
+    hf_home = os.path.abspath(hf_home)
+    os.environ["HF_HOME"] = hf_home
+print(f"HF_HOME set to: {hf_home}")
 
 from src.config import ProjectConfig
 from src.training.meta_reward import MetaRewardFunction
@@ -106,14 +113,22 @@ def main(config: DictConfig):
     project_config = ProjectConfig()
     
     if not ray.is_initialized():
+        # Get the current Python executable path to pass to Ray workers
+        import sys
+        python_executable = sys.executable
+        
         ray.init(
             runtime_env={
                 "env_vars": {
                     "TOKENIZERS_PARALLELISM": "true", 
                     "NCCL_DEBUG": "WARN",
-                    "VIRTUAL_ENV": os.environ.get("VIRTUAL_ENV", ""),
-                    "PATH": os.environ.get("PATH", ""),
-                }
+                    "HF_HOME": hf_home,
+                    "HF_HUB_CACHE": os.path.join(hf_home, "hub"),
+                    "HUGGINGFACE_HUB_CACHE": os.path.join(hf_home, "hub"),
+                    "TRANSFORMERS_CACHE": os.path.join(hf_home, "hub"),
+                },
+                # Use pip instead of uv to prevent Ray from creating new venv
+                "pip": [],
             },
             num_cpus=config.trainer.get("num_cpus", os.cpu_count())
         )
