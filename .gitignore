@@ -8,3 +8,5 @@ uv.lock
 wandb
 outputs
 output
+cache
+rl.log

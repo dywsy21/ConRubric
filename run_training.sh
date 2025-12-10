@@ -19,4 +19,4 @@ source "$(dirname "$0")/.env"
 set +a
 
 # Run training
-python -m src.training.verl_main "$@"
+python -u -m src.training.verl_main "$@" 2>&1 | tee rl.log

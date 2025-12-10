@@ -1,26 +1,78 @@
 import os
 import json
 import time
-from typing import List, Dict, Any
+import hashlib
+from pathlib import Path
+from typing import List, Dict, Any, Optional
 from openai import OpenAI
+import httpx
 from src.utils.prompts import REVERSE_ENGINEER_RUBRIC_PROMPT, ANCHOR_EVALUATION_PROMPT, DYNAMIC_RUBRIC_EVALUATION_PROMPT
+
+# Global cache directory
+CACHE_DIR = Path(os.environ.get("GRM_CACHE_DIR", "./cache/api_responses"))
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+def _get_cache_key(model: str, prompt: str) -> str:
+    """Generate a unique cache key for the request."""
+    content = f"{model}|{prompt}"
+    return hashlib.md5(content.encode()).hexdigest()
+
+def _load_from_cache(cache_key: str, cache_type: str = "judge") -> Optional[str]:
+    """Load response from cache if exists."""
+    cache_file = CACHE_DIR / cache_type / f"{cache_key}.json"
+    if cache_file.exists():
+        try:
+            with open(cache_file, 'r') as f:
+                data = json.load(f)
+                return data.get('response')
+        except Exception:
+            pass
+    return None
+
+def _save_to_cache(cache_key: str, response: str, cache_type: str = "judge"):
+    """Save response to cache."""
+    cache_subdir = CACHE_DIR / cache_type
+    cache_subdir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_subdir / f"{cache_key}.json"
+    try:
+        with open(cache_file, 'w') as f:
+            json.dump({'response': response}, f)
+    except Exception as e:
+        print(f"Warning: Failed to save cache: {e}")
 
 class Judge:
     def __init__(self, model_name: str = "gpt-4o", api_key: str = None, api_base: str = None):
         self.model_name = model_name
+        # Create HTTP client with no timeout
+        http_client = httpx.Client(timeout=None)
         self.client = OpenAI(
             api_key=api_key or os.environ.get("OPENAI_API_KEY"),
-            base_url=api_base or os.environ.get("OPENAI_BASE_URL")
+            base_url=api_base or os.environ.get("OPENAI_BASE_URL"),
+            http_client=http_client
         )
 
-    def _call_api(self, prompt: str, temperature: float = 0.7) -> str:
+    def _call_api(self, prompt: str, temperature: float = 0.7, use_cache: bool = True) -> str:
+        # Check cache first (only for deterministic calls with temp=0)
+        cache_key = None
+        if use_cache and temperature == 0.0:
+            cache_key = _get_cache_key(self.model_name, prompt)
+            cached_response = _load_from_cache(cache_key, "judge")
+            if cached_response is not None:
+                return cached_response
+        
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=temperature,
             )
-            return response.choices[0].message.content
+            result = response.choices[0].message.content
+            
+            # Save to cache for deterministic calls
+            if cache_key:
+                _save_to_cache(cache_key, result, "judge")
+            
+            return result
         except Exception as e:
             print(f"Error calling Judge API: {e}")
             return ""
