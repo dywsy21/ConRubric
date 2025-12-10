@@ -1,5 +1,6 @@
 import os
 import socket
+import asyncio
 import ray
 import torch
 import hydra
@@ -16,6 +17,19 @@ if not os.path.isabs(hf_home):
     hf_home = os.path.abspath(hf_home)
     os.environ["HF_HOME"] = hf_home
 print(f"HF_HOME set to: {hf_home}")
+
+# Monkey patch asyncio.get_running_loop to work in sync context
+# This is needed for verl's vLLM async rollout which calls get_running_loop during __init__
+_original_get_running_loop = asyncio.get_running_loop
+def _patched_get_running_loop():
+    try:
+        return _original_get_running_loop()
+    except RuntimeError:
+        # No running event loop, create one
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop
+asyncio.get_running_loop = _patched_get_running_loop
 
 from src.config import ProjectConfig
 from src.training.meta_reward import MetaRewardFunction
@@ -104,8 +118,11 @@ def create_rl_sampler(data_config, dataset):
 
 # Determine config name based on env var
 config_name = "ppo_trainer"
-if os.getenv("RL_ALGORITHM", "").lower() == "dapo":
+rl_algo = os.getenv("RL_ALGORITHM", "").lower()
+if rl_algo == "dapo":
     config_name = "dapo_trainer"
+elif rl_algo == "grpo":
+    config_name = "grpo_trainer"
 
 @hydra.main(config_path="config", config_name=config_name, version_base=None)
 def main(config: DictConfig):
@@ -141,13 +158,33 @@ def main(config: DictConfig):
         if 'tensor_model_parallel_size' in config.critic.model:
             del config.critic.model.tensor_model_parallel_size
 
-    # Convert critic.optim to a FSDPOptimizerConfig-like object that supports attribute access
-    # This is needed because build_optimizer expects config.optim.lr, config.optim.weight_decay, etc.
+    # Convert optim configs to non-struct mode and add all required fields
+    # This is needed because build_optimizer accesses optional fields like override_optimizer_config
+    from omegaconf import open_dict
+    
+    # Helper to ensure optim config has all required fields for FSDPOptimizerConfig
+    def fix_optim_config(optim_cfg):
+        with open_dict(optim_cfg):
+            if '_target_' not in optim_cfg:
+                optim_cfg._target_ = 'verl.workers.config.optimizer.FSDPOptimizerConfig'
+            if 'optimizer' not in optim_cfg:
+                optim_cfg.optimizer = 'AdamW'
+            if 'optimizer_impl' not in optim_cfg:
+                optim_cfg.optimizer_impl = 'torch.optim'
+            if 'betas' not in optim_cfg:
+                optim_cfg.betas = [0.9, 0.999]
+            if 'override_optimizer_config' not in optim_cfg:
+                optim_cfg.override_optimizer_config = None
+            if 'clip_grad' not in optim_cfg:
+                optim_cfg.clip_grad = None
+            if 'grad_clip' not in optim_cfg:
+                optim_cfg.grad_clip = None
+    
     if 'critic' in config and 'optim' in config.critic:
-        from omegaconf import open_dict
-        with open_dict(config):
-            if '_target_' not in config.critic.optim:
-                config.critic.optim._target_ = 'verl.workers.config.optimizer.FSDPOptimizerConfig'
+        fix_optim_config(config.critic.optim)
+    
+    if 'actor_rollout_ref' in config and 'actor' in config.actor_rollout_ref and 'optim' in config.actor_rollout_ref.actor:
+        fix_optim_config(config.actor_rollout_ref.actor.optim)
 
     # Tokenizer
     local_path = config.actor_rollout_ref.model.path
@@ -158,7 +195,34 @@ def main(config: DictConfig):
 
     # Define Worker Classes
     # Assuming FSDP for now as per config
-    actor_rollout_cls = ActorRolloutRefWorker
+    
+    # Patch ActorRolloutRefWorker to work around vLLM's asyncio requirement
+    # vLLM's _init_zeromq calls asyncio.get_running_loop() which requires 
+    # an actually running event loop, not just one that's been set.
+    class PatchedActorRolloutRefWorker(ActorRolloutRefWorker):
+        def _build_rollout(self, *args, **kwargs):
+            import asyncio
+            
+            async def _async_build_rollout():
+                # Call the parent's _build_rollout inside an async context
+                # This provides the running event loop that vLLM expects
+                return super(PatchedActorRolloutRefWorker, self)._build_rollout(*args, **kwargs)
+            
+            # Get or create event loop and run the async function
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            if loop.is_running():
+                # If we're already in an async context, just call directly
+                return super()._build_rollout(*args, **kwargs)
+            else:
+                # Run the build in the event loop
+                return loop.run_until_complete(_async_build_rollout())
+            
+    actor_rollout_cls = PatchedActorRolloutRefWorker
     critic_cls = CriticWorker
     ray_worker_group_cls = RayWorkerGroup
 

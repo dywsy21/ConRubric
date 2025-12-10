@@ -9,9 +9,9 @@ dependencies = [
     "transformers>=4.36.0",
     "datasets>=2.14.0",
     "accelerate>=0.25.0",
-    "vllm>=0.2.6",
-    "ray>=2.9.0",
-    "verl", # VolcEngine Reinforcement Learning library
+    "vllm>=0.8.5,<=0.11.0",
+    "ray>=2.50.1",
+    "verl==0.6.1", # VolcEngine Reinforcement Learning library
     "numpy",
     "pandas",
     "openai", # For Oracle/Judge API calls

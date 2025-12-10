@@ -6,6 +6,18 @@ defaults:
   - ppo_trainer
   - _self_
 
+global_profiler:
+  steps: null
+
+# Algorithm settings for GRPO
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: True
+  use_kl_in_reward: False
+  kl_ctrl:
+    type: fixed
+    kl_coef: 0.001
+
 data:
   tokenizer: null
   train_files: ['data/synthetic_rubrics.parquet']
@@ -13,8 +25,8 @@ data:
   prompt_key: prompt
   reward_fn_key: data_source
   max_prompt_length: 512
-  max_response_length: 512
-  train_batch_size: 64
+  max_response_length: 256
+  train_batch_size: 8
   gen_batch_size: ${data.train_batch_size}
   val_batch_size: null
   return_raw_input_ids: False
@@ -43,10 +55,10 @@ actor_rollout_ref:
     external_lib: null
     override_config:
       torch_dtype: bfloat16
-      attn_implementation: flash_attention_2
+      attn_implementation: sdpa
     enable_gradient_checkpointing: true
     enable_activation_offload: false
-    use_remove_padding: true
+    use_remove_padding: false
     lora_rank: 0
     lora_alpha: 16
     target_modules: all-linear
@@ -59,25 +71,20 @@ actor_rollout_ref:
     _target_: verl.workers.config.FSDPActorConfig
     strategy: fsdp
     rollout_n: ${actor_rollout_ref.rollout.n}
-    ppo_mini_batch_size: 16
+    ppo_mini_batch_size: 8
     ppo_micro_batch_size: null
-    ppo_micro_batch_size_per_gpu: 4
+    ppo_micro_batch_size_per_gpu: 2
     use_dynamic_bsz: false
-    ppo_max_token_len_per_gpu: 16384
+    ppo_max_token_len_per_gpu: 8192
     grad_clip: 1.0
     clip_ratio: 0.2
     clip_ratio_low: 0.2
     clip_ratio_high: 0.28
     policy_loss:
       loss_mode: "vanilla"
-      clip_cov_ratio: 0.0002
-      clip_cov_lb: 1.0
-      clip_cov_ub: 5.0
-      kl_cov_ratio: 0.0002
-      ppo_kl_coef: 0.1
     clip_ratio_c: 3.0
     loss_agg_mode: token-mean
-    entropy_coeff: 0
+    entropy_coeff: 0.001
     use_kl_loss: false
     use_torch_compile: false
     kl_loss_coef: 0.001
@@ -131,14 +138,14 @@ actor_rollout_ref:
   rollout:
     _target_: verl.workers.config.RolloutConfig
     name: vllm
-    mode: async
+    mode: sync
     temperature: 1.0
     top_k: -1
     top_p: 1
     prompt_length: ${data.max_prompt_length}
     response_length: ${data.max_response_length}
     dtype: bfloat16
-    gpu_memory_utilization: 0.5
+    gpu_memory_utilization: 0.4
     ignore_eos: False
     enforce_eager: True
     free_cache_engine: True
@@ -148,42 +155,41 @@ actor_rollout_ref:
     data_parallel_size: 1
     pipeline_model_parallel_size: 1
     expert_parallel_size: 1
-    max_num_batched_tokens: 8192
+    max_num_batched_tokens: 4096
     max_model_len: null
-    max_num_seqs: 1024
-    log_prob_micro_batch_size: 16
+    max_num_seqs: 256
+    log_prob_micro_batch_size: 4
     log_prob_micro_batch_size_per_gpu: null
     log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
     log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
     disable_log_stats: True
     enable_chunked_prefill: True
     do_sample: True
-    n: 4
+    n: 2
     multi_stage_wake_up: false
     engine_kwargs:
-      vllm:
-        swap_space: null
-        disable_mm_preprocessor_cache: False
-      sglang:
-        attention_backend: null
+      vllm: {}
+      sglang: {}
     val_kwargs:
+      _target_: verl.workers.config.SamplingConfig
       top_k: -1
       top_p: 1.0
       temperature: 0
       n: 1
       do_sample: False
     multi_turn:
+      _target_: verl.workers.config.MultiTurnConfig
       enable: False
       max_assistant_turns: null
       tool_config_path: null
       max_user_turns: null
       interaction_config_path: null
-      completion_callback: null
       use_inference_chat_template: False
       tokenization_sanity_check_mode: strict
       format: hermes
     calculate_log_probs: False
 
+# Disable critic for GRPO
 critic:
   _target_: verl.workers.config.CriticConfig
   enable: False
@@ -201,124 +207,43 @@ critic:
     betas: [0.9, 0.999]
   model:
     _target_: verl.workers.config.critic.FSDPCriticModelCfg
-    path: Qwen/Qwen3-4B-Instruct-2507
+    path: ${actor_rollout_ref.model.path}
     use_shm: False
     tokenizer_path: ${actor_rollout_ref.model.path}
     override_config:
       torch_dtype: bfloat16
       attn_implementation: flash_attention_2
     external_lib: ${actor_rollout_ref.model.external_lib}
-    enable_gradient_checkpointing: True
-    enable_activation_offload: False
-    use_remove_padding: True
+    enable_gradient_checkpointing: ${actor_rollout_ref.model.enable_gradient_checkpointing}
+    use_remove_padding: ${actor_rollout_ref.model.use_remove_padding}
     trust_remote_code: ${actor_rollout_ref.model.trust_remote_code}
     fsdp_config:
       _target_: verl.workers.config.engine.FSDPEngineConfig
-      param_offload: False
-      optimizer_offload: False
-      offload_policy: False
-      reshard_after_forward: True
       wrap_policy:
         min_num_params: 0
-      fsdp_size: -1
-      forward_prefetch: False
-      model_dtype: bfloat16
-      dtype: bfloat16
-    lora_rank: 0
-    lora_alpha: 16
-    target_modules: all-linear
-    tensor_model_parallel_size: ~
-  ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
-  ppo_micro_batch_size: null
-  ppo_micro_batch_size_per_gpu: 4
-  use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
-  ppo_max_token_len_per_gpu: 32768
-  ppo_epochs: ${actor_rollout_ref.actor.ppo_epochs}
-  shuffle: ${actor_rollout_ref.actor.shuffle}
-  cliprange_value: 0.5
-  loss_agg_mode: ${actor_rollout_ref.actor.loss_agg_mode}
-  checkpoint:
-    save_contents: ['model', 'optimizer', 'extra']
-    load_contents: ${critic.checkpoint.save_contents}
+      param_offload: False
+      reshard_after_forward: True
 
 reward_model:
   enable: False
-  strategy: ${actor_rollout_ref.actor.strategy}
-  model:
-    input_tokenizer: ${actor_rollout_ref.model.path}
-    path: ~/models/FsfairX-LLaMA3-RM-v0.1
-    use_shm: False
-    external_lib: ${actor_rollout_ref.model.external_lib}
-    use_remove_padding: False
-    use_fused_kernels: ${actor_rollout_ref.model.use_fused_kernels}
-    trust_remote_code: False
-    fsdp_config:
-      wrap_policy:
-        min_num_params: 0
-      param_offload: False
-      reshard_after_forward: True
-      fsdp_size: -1
-      forward_prefetch: False
-  micro_batch_size: null
-  micro_batch_size_per_gpu: null
-  max_length: null
-  ulysses_sequence_parallel_size: 1
-  use_dynamic_bsz: ${critic.use_dynamic_bsz}
-  forward_max_token_len_per_gpu: ${critic.ppo_max_token_len_per_gpu}
-  reward_manager: dapo
-  overlong_buffer: 
-    enable: False # We try to avoid forgetting to set enable
-    len: 0
-    penalty_factor: 0.0
-    log: False
-  launch_reward_fn_async: False
-  sandbox_fusion:
-    url: null
-    max_concurrent: 64
-    memory_limit_mb: 1024
-
-custom_reward_function:
-  path: null
-  name: compute_score
-
-algorithm:
-  gamma: 1.0
-  lam: 0.95
-  adv_estimator: gae
-  norm_adv_by_std_in_grpo: True
-  use_kl_in_reward: False
-  kl_penalty: kl
-  kl_ctrl:
-    type: fixed
-    kl_coef: 0.001
-    horizon: 10000
-    target_kl: 0.1
-  use_pf_ppo: False
-  pf_ppo:
-    reweight_method: pow
-    weight_pow: 2.0
-  filter_groups:
-    _target_: verl.trainer.config.FilterGroupsConfig
-    enable: False # We try to avoid forgetting to set enable
-    metric: null # acc / score / seq_reward / seq_final_reward / ...
-    max_num_gen_batches: 0 # Non-positive values mean no upper limit
 
 trainer:
-  project_name: verl-dapo
-  experiment_name: dapo_experiment
+  total_epochs: 1
+  total_training_steps: 2
+  project_name: grm-grpo
+  experiment_name: grpo_qwen3_4b
   logger: ['console']
   nnodes: 1
   n_gpus_per_node: 1
   save_freq: -1
-  test_freq: -1
-  total_epochs: 1
-  total_training_steps: null
+  test_freq: 1
   default_hdfs_dir: null
-  default_local_dir: checkpoints
+  default_local_dir: checkpoints/grpo
   resume_mode: disable
-  resume_from_path: null
-  remove_previous_ckpt_in_save: false
-  del_local_ckpt_after_upload: false
-
-global_profiler:
-  steps: null
+  val_before_train: false
+  val_generations_to_log_to_wandb: 0
+  critic_warmup: 0
+  remove_previous_ckpt_in_save: True
+  del_local_ckpt_after_load: True
+  max_actor_ckpt_to_keep: 1
+  max_critic_ckpt_to_keep: null
