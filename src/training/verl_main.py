@@ -1,5 +1,13 @@
 import os
 import socket
+import sys
+
+# Disable uvloop BEFORE any imports - uvloop doesn't support nested event loops
+# and verl's vLLM integration requires nested run_until_complete calls
+os.environ["VERL_DISABLE_UVLOOP"] = "1"
+if "uvloop" in sys.modules:
+    del sys.modules["uvloop"]
+
 import asyncio
 import ray
 import torch
@@ -17,6 +25,10 @@ if not os.path.isabs(hf_home):
     hf_home = os.path.abspath(hf_home)
     os.environ["HF_HOME"] = hf_home
 print(f"HF_HOME set to: {hf_home}")
+
+# Enable nested asyncio event loops - needed for verl's vLLM async rollout
+import nest_asyncio
+nest_asyncio.apply()
 
 # Monkey patch asyncio.get_running_loop to work in sync context
 # This is needed for verl's vLLM async rollout which calls get_running_loop during __init__
@@ -202,6 +214,12 @@ def main(config: DictConfig):
     class PatchedActorRolloutRefWorker(ActorRolloutRefWorker):
         def _build_rollout(self, *args, **kwargs):
             import asyncio
+            import nest_asyncio
+            
+            # Apply nest_asyncio to allow nested event loops (needed for vLLM + Ray)
+            # This is critical because vLLM needs a running loop, but the parent method
+            # calls run_until_complete which fails if a loop is already running.
+            nest_asyncio.apply()
             
             async def _async_build_rollout():
                 # Call the parent's _build_rollout inside an async context
@@ -217,7 +235,8 @@ def main(config: DictConfig):
             
             if loop.is_running():
                 # If we're already in an async context, just call directly
-                return super()._build_rollout(*args, **kwargs)
+                # With nest_asyncio, the parent's run_until_complete will work
+                return super(PatchedActorRolloutRefWorker, self)._build_rollout(*args, **kwargs)
             else:
                 # Run the build in the event loop
                 return loop.run_until_complete(_async_build_rollout())
