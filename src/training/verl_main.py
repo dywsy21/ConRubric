@@ -141,6 +141,14 @@ def main(config: DictConfig):
         if 'tensor_model_parallel_size' in config.critic.model:
             del config.critic.model.tensor_model_parallel_size
 
+    # Convert critic.optim to a FSDPOptimizerConfig-like object that supports attribute access
+    # This is needed because build_optimizer expects config.optim.lr, config.optim.weight_decay, etc.
+    if 'critic' in config and 'optim' in config.critic:
+        from omegaconf import open_dict
+        with open_dict(config):
+            if '_target_' not in config.critic.optim:
+                config.critic.optim._target_ = 'verl.workers.config.optimizer.FSDPOptimizerConfig'
+
     # Tokenizer
     local_path = config.actor_rollout_ref.model.path
     # In a real setup, we might need to download model to local path first if it's a repo ID

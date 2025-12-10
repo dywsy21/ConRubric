@@ -41,7 +41,9 @@ actor_rollout_ref:
     custom_chat_template: null
     use_shm: false
     external_lib: null
-    override_config: {}
+    override_config:
+      torch_dtype: bfloat16
+      attn_implementation: flash_attention_2
     enable_gradient_checkpointing: true
     enable_activation_offload: false
     use_remove_padding: true
@@ -97,6 +99,7 @@ actor_rollout_ref:
       total_training_steps: -1
       weight_decay: 0.1
     fsdp_config:
+      _target_: verl.workers.config.engine.FSDPEngineConfig
       wrap_policy:
         min_num_params: 0
       param_offload: false
@@ -108,6 +111,7 @@ actor_rollout_ref:
     _target_: verl.workers.config.RefConfig
     strategy: ${actor_rollout_ref.actor.strategy}
     fsdp_config:
+      _target_: verl.workers.config.engine.FSDPEngineConfig
       param_offload: false
       reshard_after_forward: true
       forward_prefetch: False
@@ -192,7 +196,9 @@ critic:
     path: Qwen/Qwen3-4B-Instruct-2507
     use_shm: False
     tokenizer_path: ${actor_rollout_ref.model.path}
-    override_config: { }
+    override_config:
+      torch_dtype: bfloat16
+      attn_implementation: flash_attention_2
     external_lib: ${actor_rollout_ref.model.external_lib}
     enable_gradient_checkpointing: True
     enable_activation_offload: False
