@@ -107,12 +107,24 @@ def main(config: DictConfig):
     
     if not ray.is_initialized():
         ray.init(
-            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN"}},
+            runtime_env={
+                "env_vars": {
+                    "TOKENIZERS_PARALLELISM": "true", 
+                    "NCCL_DEBUG": "WARN",
+                    "VIRTUAL_ENV": os.environ.get("VIRTUAL_ENV", ""),
+                    "PATH": os.environ.get("PATH", ""),
+                }
+            },
             num_cpus=config.trainer.get("num_cpus", os.cpu_count())
         )
 
     # Resolve config
     OmegaConf.resolve(config)
+
+    # Hack to remove tensor_model_parallel_size from critic.model if present
+    if 'critic' in config and 'model' in config.critic:
+        if 'tensor_model_parallel_size' in config.critic.model:
+            del config.critic.model.tensor_model_parallel_size
 
     # Tokenizer
     local_path = config.actor_rollout_ref.model.path

@@ -37,7 +37,7 @@ actor_rollout_ref:
   hybrid_engine: true
   model:
     _target_: verl.workers.config.HFModelConfig
-    path: Qwen/Qwen2.5-7B-Instruct
+    path: /home/wsy/GRM/data/hub/models--Qwen--Qwen2.5-7B-Instruct/snapshots/a09a35458c702b33eeacc393d103063234e8bc28
     custom_chat_template: null
     use_shm: false
     external_lib: null
@@ -121,10 +121,6 @@ actor_rollout_ref:
     ulysses_sequence_parallel_size: ${actor_rollout_ref.actor.ulysses_sequence_parallel_size}
     entropy_from_logits_with_chunking: False
     entropy_checkpointing: False
-    profiler:
-      all_ranks: False
-      ranks: []
-      tool: null
   rollout:
     _target_: verl.workers.config.RolloutConfig
     name: vllm
@@ -178,10 +174,6 @@ actor_rollout_ref:
       tokenization_sanity_check_mode: strict
       format: hermes
     calculate_log_probs: False
-    profiler:
-      all_ranks: False
-      ranks: []
-      tool: null
 
 critic:
   _target_: verl.workers.config.CriticConfig
@@ -196,7 +188,8 @@ critic:
     total_training_steps: -1
     weight_decay: 0.01
   model:
-    path: Qwen/Qwen2.5-7B-Instruct
+    _target_: verl.workers.config.critic.FSDPCriticModelCfg
+    path: /home/wsy/GRM/data/hub/models--Qwen--Qwen2.5-7B-Instruct/snapshots/a09a35458c702b33eeacc393d103063234e8bc28
     use_shm: False
     tokenizer_path: ${actor_rollout_ref.model.path}
     override_config: { }
@@ -206,6 +199,7 @@ critic:
     use_remove_padding: True
     trust_remote_code: ${actor_rollout_ref.model.trust_remote_code}
     fsdp_config:
+      _target_: verl.workers.config.engine.FSDPEngineConfig
       param_offload: False
       optimizer_offload: False
       offload_policy: False
@@ -217,6 +211,7 @@ critic:
     lora_rank: 0
     lora_alpha: 16
     target_modules: all-linear
+    tensor_model_parallel_size: ~
   ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
   ppo_micro_batch_size: null
   ppo_micro_batch_size_per_gpu: 4
@@ -229,10 +224,6 @@ critic:
   checkpoint:
     save_contents: ['model', 'optimizer', 'extra']
     load_contents: ${critic.checkpoint.save_contents}
-  profiler:
-    all_ranks: False
-    ranks: []
-    tool: null
 
 reward_model:
   enable: False
@@ -269,9 +260,6 @@ reward_model:
     url: null
     max_concurrent: 64
     memory_limit_mb: 1024
-  profiler:
-    all_ranks: False
-    ranks: []
 
 custom_reward_function:
   path: null
