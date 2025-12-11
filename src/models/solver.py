@@ -43,21 +43,23 @@ def _save_to_cache(cache_key: str, response: str, cache_type: str = "solver", me
     except Exception as e:
         print(f"Warning: Failed to save cache: {e}")
 
+# Default timeout settings
+DEFAULT_TIMEOUT = 300  # 5 minutes
+MAX_RETRIES = 3
+
 class Solver:
     def __init__(self, model_name: str, device: str = "cuda" if torch.cuda.is_available() else "cpu", 
-                 is_remote: bool = False, api_key: str = None, api_base: str = None):
+                 is_remote: bool = False, api_key: str = None, api_base: str = None,
+                 timeout: float = DEFAULT_TIMEOUT):
         self.model_name = model_name
         self.is_remote = is_remote
+        self.base_timeout = timeout
+        self.api_key = api_key or os.environ.get("SOLVER_API_KEY")
+        self.api_base = api_base or os.environ.get("SOLVER_API_BASE")
         
         if self.is_remote:
             print(f"Initializing Remote Solver: {model_name}")
-            # Create HTTP client with no timeout
-            http_client = httpx.Client(timeout=None)
-            self.client = OpenAI(
-                api_key=api_key or os.environ.get("SOLVER_API_KEY"),
-                base_url=api_base or os.environ.get("SOLVER_API_BASE"),
-                http_client=http_client
-            )
+            self._init_client(timeout)
         else:
             self.device = device
             print(f"Loading Local Solver model: {model_name} on {device}")
@@ -72,6 +74,50 @@ class Solver:
             except Exception as e:
                 print(f"Error loading model {model_name}: {e}")
                 raise e
+    
+    def _init_client(self, timeout: float):
+        """Initialize OpenAI client with specified timeout."""
+        http_client = httpx.Client(timeout=httpx.Timeout(timeout, connect=60.0))
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.api_base,
+            http_client=http_client
+        )
+        self.current_timeout = timeout
+    
+    def _call_with_retry(self, prompt: str, max_retries: int = MAX_RETRIES) -> str:
+        """Call API with exponential backoff on timeout."""
+        current_timeout = self.base_timeout
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                # Reinitialize client with current timeout
+                if attempt > 0:
+                    print(f"Solver retry {attempt}/{max_retries} with timeout={current_timeout}s")
+                    self._init_client(current_timeout)
+                
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.7,
+                    max_tokens=512
+                )
+                return response.choices[0].message.content
+            except (httpx.TimeoutException, httpx.ReadTimeout, Exception) as e:
+                last_error = e
+                error_str = str(e).lower()
+                if 'timeout' in error_str or 'timed out' in error_str or isinstance(e, (httpx.TimeoutException, httpx.ReadTimeout)):
+                    print(f"Solver timeout on attempt {attempt + 1}/{max_retries}: {e}")
+                    # Exponential backoff: double timeout each retry
+                    current_timeout = current_timeout * 2
+                else:
+                    # Non-timeout error, don't retry
+                    print(f"Solver non-timeout error: {e}")
+                    break
+        
+        print(f"Solver all retries failed. Last error: {last_error}")
+        return ""
 
     def generate_answer(self, question: str, rubric: str) -> str:
         """
@@ -95,21 +141,12 @@ Please ensure your answer follows these principles:
 Answer:
 """
         if self.is_remote:
-            try:
-                response = self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.7,
-                    max_tokens=512
-                )
-                answer = response.choices[0].message.content
+            answer = self._call_with_retry(prompt)
+            if answer:
                 # Save to cache
                 _save_to_cache(cache_key, answer, "solver", 
                               {'model': self.model_name, 'question': question[:100], 'rubric': rubric[:100]})
-                return answer
-            except Exception as e:
-                print(f"Error calling Remote Solver API: {e}")
-                return ""
+            return answer
         else:
             inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
             

@@ -40,16 +40,28 @@ def _save_to_cache(cache_key: str, response: str, cache_type: str = "judge"):
     except Exception as e:
         print(f"Warning: Failed to save cache: {e}")
 
+# Default timeout settings
+DEFAULT_TIMEOUT = 300  # 5 minutes
+MAX_RETRIES = 3
+
 class Judge:
-    def __init__(self, model_name: str = "gpt-4o", api_key: str = None, api_base: str = None):
+    def __init__(self, model_name: str = "gpt-4o", api_key: str = None, api_base: str = None,
+                 timeout: float = DEFAULT_TIMEOUT):
         self.model_name = model_name
-        # Create HTTP client with no timeout
-        http_client = httpx.Client(timeout=None)
+        self.base_timeout = timeout
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        self.api_base = api_base or os.environ.get("OPENAI_BASE_URL")
+        self._init_client(timeout)
+    
+    def _init_client(self, timeout: float):
+        """Initialize OpenAI client with specified timeout."""
+        http_client = httpx.Client(timeout=httpx.Timeout(timeout, connect=60.0))
         self.client = OpenAI(
-            api_key=api_key or os.environ.get("OPENAI_API_KEY"),
-            base_url=api_base or os.environ.get("OPENAI_BASE_URL"),
+            api_key=self.api_key,
+            base_url=self.api_base,
             http_client=http_client
         )
+        self.current_timeout = timeout
 
     def _call_api(self, prompt: str, temperature: float = 0.7, use_cache: bool = True) -> str:
         # Check cache first (only for deterministic calls with temp=0)
@@ -60,22 +72,46 @@ class Judge:
             if cached_response is not None:
                 return cached_response
         
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-            )
-            result = response.choices[0].message.content
-            
-            # Save to cache for deterministic calls
-            if cache_key:
-                _save_to_cache(cache_key, result, "judge")
-            
-            return result
-        except Exception as e:
-            print(f"Error calling Judge API: {e}")
-            return ""
+        result = self._call_with_retry(prompt, temperature)
+        
+        # Save to cache for deterministic calls
+        if cache_key and result:
+            _save_to_cache(cache_key, result, "judge")
+        
+        return result
+    
+    def _call_with_retry(self, prompt: str, temperature: float, max_retries: int = MAX_RETRIES) -> str:
+        """Call API with exponential backoff on timeout."""
+        current_timeout = self.base_timeout
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                # Reinitialize client with current timeout
+                if attempt > 0:
+                    print(f"Judge retry {attempt}/{max_retries} with timeout={current_timeout}s")
+                    self._init_client(current_timeout)
+                
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                )
+                return response.choices[0].message.content
+            except (httpx.TimeoutException, httpx.ReadTimeout, Exception) as e:
+                last_error = e
+                error_str = str(e).lower()
+                if 'timeout' in error_str or 'timed out' in error_str or isinstance(e, (httpx.TimeoutException, httpx.ReadTimeout)):
+                    print(f"Judge timeout on attempt {attempt + 1}/{max_retries}: {e}")
+                    # Exponential backoff: double timeout each retry
+                    current_timeout = current_timeout * 2
+                else:
+                    # Non-timeout error, don't retry
+                    print(f"Judge non-timeout error: {e}")
+                    break
+        
+        print(f"Judge all retries failed. Last error: {last_error}")
+        return ""
 
     def reverse_engineer_rubric(self, question: str, gold_answer: str) -> List[str]:
         prompt = REVERSE_ENGINEER_RUBRIC_PROMPT.format(question=question, gold_answer=gold_answer)
