@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import hashlib
@@ -137,24 +138,63 @@ class Judge:
             print(f"Error parsing rubric: {e}")
             return []
 
-    def evaluate_answer(self, question: str, answer: str, rubric: str = None) -> float:
+    def evaluate_answer(self, question: str, answer: str, rubric: str = None, max_retries: int = 3) -> float:
         """
         Evaluates an answer and returns a scalar score (0-10).
+        Retries on parsing errors.
         """
         if rubric:
             prompt = DYNAMIC_RUBRIC_EVALUATION_PROMPT.format(question=question, answer=answer, rubric=rubric)
         else:
             prompt = ANCHOR_EVALUATION_PROMPT.format(question=question, answer=answer)
-            
-        response_text = self._call_api(prompt, temperature=0.0)
         
+        cache_key = _get_cache_key(self.model_name, prompt)
+        
+        for attempt in range(max_retries):
+            # On retry, skip cache to get fresh response
+            use_cache = (attempt == 0)
+            response_text = self._call_api(prompt, temperature=0.0, use_cache=use_cache)
+            
+            score = self._parse_evaluation_response(response_text)
+            if score is not None:
+                # Valid response - update cache with good response
+                if attempt > 0:
+                    _save_to_cache(cache_key, response_text, "judge")
+                return score
+            
+            if attempt < max_retries - 1:
+                print(f"Retrying evaluation (attempt {attempt + 2}/{max_retries})...")
+        
+        print("All evaluation retries failed, returning 0.0")
+        return 0.0
+    
+    def _parse_evaluation_response(self, response_text: str) -> Optional[float]:
+        """Parse evaluation response and return score, or None if parsing fails."""
+        if not response_text:
+            return None
+            
         try:
             # Attempt to find JSON
             start = response_text.find('{')
             end = response_text.rfind('}') + 1
-            if start != -1 and end != -1:
+            if start != -1 and end != 0:
                 json_str = response_text[start:end]
-                result = json.loads(json_str)
+                
+                # Fix common JSON escape issues
+                # Replace problematic escape sequences
+                import re
+                # Fix invalid escapes like \_ \* etc by escaping the backslash
+                json_str = re.sub(r'\\([^"\\/bfnrtu])', r'\\\\\1', json_str)
+                
+                try:
+                    result = json.loads(json_str)
+                except json.JSONDecodeError:
+                    # Try with strict=False for more lenient parsing
+                    try:
+                        result = json.loads(json_str, strict=False)
+                    except json.JSONDecodeError as e:
+                        print(f"Error parsing evaluation: {e}")
+                        return None
                 
                 # Handle both formats
                 if "score" in result:
@@ -163,13 +203,18 @@ class Judge:
                     return float(result["overall"])
                 else:
                     print("No score found in JSON")
-                    return 0.0
+                    return None
             else:
+                # Try to extract score using regex as fallback
+                import re
+                score_match = re.search(r'"?(?:score|overall)"?\s*[:=]\s*(\d+(?:\.\d+)?)', response_text, re.IGNORECASE)
+                if score_match:
+                    return float(score_match.group(1))
                 print("Could not find JSON in evaluation response")
-                return 0.0
+                return None
         except Exception as e:
             print(f"Error parsing evaluation: {e}")
-            return 0.0
+            return None
 
     def check_correctness(self, question: str, answer: str, gold: str) -> bool:
         """

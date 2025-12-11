@@ -15,10 +15,15 @@ global_profiler:
 
 # Algorithm settings for GRPO
 algorithm:
+  _target_: verl.trainer.config.AlgoConfig
+  gamma: 1.0
+  lam: 1.0
   adv_estimator: grpo
   norm_adv_by_std_in_grpo: True
   use_kl_in_reward: False
+  kl_penalty: kl
   kl_ctrl:
+    _target_: verl.trainer.config.KLControlConfig
     type: fixed
     kl_coef: 0.001
 
@@ -106,10 +111,10 @@ actor_rollout_ref:
       optimizer: AdamW
       optimizer_impl: torch.optim
       lr: 1e-6
-      lr_warmup_steps: 10
+      lr_warmup_steps: 0
       lr_warmup_steps_ratio: 0.0
-      min_lr_ratio: 0.0
-      total_training_steps: -1
+      min_lr_ratio: 1.0
+      total_training_steps: ${trainer.total_training_steps}
       weight_decay: 0.1
       betas: [0.9, 0.999]
     fsdp_config:
@@ -239,17 +244,24 @@ trainer:
   project_name: grm-grpo
   experiment_name: grpo_qwen3_4b
   logger: ['console']
+  log_val_generations: 0
+  rollout_data_dir: null
+  validation_data_dir: null
   nnodes: 1
   n_gpus_per_node: 1
   save_freq: -1
+  esi_redundant_time: 0
+  resume_mode: disable
+  resume_from_path: null
+  val_before_train: false
+  val_only: false
   test_freq: 1
+  critic_warmup: 0
   default_hdfs_dir: null
   default_local_dir: checkpoints/grpo
-  resume_mode: disable
-  val_before_train: false
-  val_generations_to_log_to_wandb: 0
-  critic_warmup: 0
-  remove_previous_ckpt_in_save: True
-  del_local_ckpt_after_load: True
   max_actor_ckpt_to_keep: 1
   max_critic_ckpt_to_keep: null
+  ray_wait_register_center_timeout: 300
+  device: cuda
+  use_legacy_worker_impl: auto
+  del_local_ckpt_after_load: true

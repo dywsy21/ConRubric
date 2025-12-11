@@ -52,7 +52,7 @@ This will fine-tune the GRM on the synthetic rubrics.
 1.  **Run RL Training**:
 
 ```bash
-source .venv/bin/activate && python -m src.training.verl_main 
+./run_training.sh
 ```
 
 This will start the RL loop using `verl` (requires `verl` to be installed).
