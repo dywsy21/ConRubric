@@ -52,7 +52,7 @@ This will fine-tune the GRM on the synthetic rubrics.
 1.  **Run RL Training**:
 
 ```bash
-./run_training.sh
+./run_training.sh --limit 1000000
 ```
 
 This will start the RL loop using `verl` (requires `verl` to be installed).

@@ -1,6 +1,7 @@
 import os
 import socket
 import sys
+import argparse
 
 # Disable uvloop BEFORE any imports - uvloop doesn't support nested event loops
 # and verl's vLLM integration requires nested run_until_complete calls
@@ -18,6 +19,20 @@ from dotenv import load_dotenv
 
 # Load env vars BEFORE any other imports that might use them
 load_dotenv()
+
+# Parse custom args before Hydra takes over
+def parse_custom_args():
+    """Parse custom arguments that Hydra doesn't handle."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--limit', type=int, default=None,
+                        help='Maximum number of samples')
+    # Parse known args, leave rest for Hydra
+    args, remaining = parser.parse_known_args()
+    # Put remaining args back for Hydra
+    sys.argv = [sys.argv[0]] + remaining
+    return args
+
+custom_args = parse_custom_args()
 
 # Set HF_HOME to absolute path if relative
 hf_home = os.getenv("HF_HOME", "./data")
@@ -117,8 +132,8 @@ class MetaRewardManager:
             return {'reward_tensor': token_level_rewards}
         return token_level_rewards
 
-def create_rl_dataset(data_paths, data_config, tokenizer, processor):
-    """Create a dataset."""
+def create_rl_dataset(data_paths, data_config, tokenizer, processor, limit_per_dataset=None):
+    """Create a dataset with optional per-dataset limit."""
     if not isinstance(data_paths, (list, ListConfig)):
         data_paths = [data_paths]
 
@@ -128,6 +143,19 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor):
         processor=processor,
         config=data_config,
     )
+    
+    # Apply limit if specified
+    if limit_per_dataset is not None and limit_per_dataset > 0:
+        original_len = len(dataset)
+        if original_len > limit_per_dataset:
+            # Use a subset of the dataset
+            from torch.utils.data import Subset
+            indices = list(range(min(limit_per_dataset, original_len)))
+            dataset = Subset(dataset, indices)
+            print(f"Dataset limited: {original_len} -> {len(dataset)} samples (limit={limit_per_dataset})")
+        else:
+            print(f"Dataset has {original_len} samples (under limit={limit_per_dataset})")
+    
     return dataset
 
 def create_rl_sampler(data_config, dataset):
@@ -288,12 +316,19 @@ def main(config: DictConfig):
     # We use the same reward manager for validation for now
     val_reward_manager = MetaRewardManager(tokenizer, project_config)
 
+    # Get limit from custom args
+    limit = custom_args.limit
+    if limit:
+        print(f"Applying dataset limit: {limit} samples per dataset")
+
     # Datasets
-    train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
+    train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, 
+                                       limit_per_dataset=limit)
     
     val_dataset = None
     if config.data.val_files:
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
+        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor,
+                                         limit_per_dataset=limit)
     
     # Sampler
     train_sampler = create_rl_sampler(config.data, train_dataset)

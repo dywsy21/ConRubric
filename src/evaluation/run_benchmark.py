@@ -1,13 +1,25 @@
 import os
 import argparse
 import json
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load env vars BEFORE importing HuggingFace libraries
+load_dotenv()
+
+# Set HF_HOME to absolute path if relative (must be done before importing transformers/datasets)
+hf_home = os.getenv("HF_HOME", "./data")
+if not os.path.isabs(hf_home):
+    hf_home = os.path.abspath(hf_home)
+os.environ["HF_HOME"] = hf_home
+os.environ["HF_HUB_CACHE"] = os.path.join(hf_home, "hub")
+os.environ["HUGGINGFACE_HUB_CACHE"] = os.path.join(hf_home, "hub")
+os.environ["TRANSFORMERS_CACHE"] = os.path.join(hf_home, "hub")
+print(f"HF_HOME set to: {hf_home}")
+
 import torch
 from tqdm import tqdm
 from datasets import load_dataset
-from dotenv import load_dotenv
-
-# Load env vars
-load_dotenv()
 
 from src.config import ProjectConfig
 from src.models.grm import RubricGenerator
@@ -260,8 +272,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Initialize models
+    project_config = ProjectConfig()
     grm = RubricGenerator(args.model_path)
-    judge = Judge() # Uses env vars for API key
+    judge = Judge(
+        model_name=project_config.oracle_model_name,
+        api_key=project_config.oracle_api_key,
+        api_base=project_config.oracle_api_base
+    )
     
     if "rewardbench" in args.benchmarks:
         run_reward_bench(grm, judge, args.num_samples, args.output_dir)

@@ -1,12 +1,23 @@
 import os
 import hashlib
 import json
+import logging
 import torch
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from typing import List, Optional
+from typing import List, Optional, Tuple
+from tqdm import tqdm
 from openai import OpenAI
 import httpx
+
+# Suppress verbose HTTP logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+# Default parallel settings
+DEFAULT_MAX_WORKERS = int(os.environ.get("GRM_SOLVER_WORKERS", 8))
 
 # Global cache directory
 CACHE_DIR = Path(os.environ.get("GRM_CACHE_DIR", "./cache/api_responses"))
@@ -165,5 +176,42 @@ Answer:
                 return generated_text.split("Answer:")[-1].strip()
             return generated_text.strip()
 
-    def generate_batch(self, questions: List[str], rubrics: List[str]) -> List[str]:
-        return [self.generate_answer(q, r) for q, r in zip(questions, rubrics)]
+    def generate_batch(self, questions: List[str], rubrics: List[str], 
+                       show_progress: bool = False, max_workers: int = None) -> List[str]:
+        """Generate answers in parallel using thread pool."""
+        if max_workers is None:
+            max_workers = DEFAULT_MAX_WORKERS if self.is_remote else 1
+        
+        n = len(questions)
+        results = [""] * n
+        
+        def generate_single(args: Tuple[int, str, str]) -> Tuple[int, str]:
+            idx, q, r = args
+            return idx, self.generate_answer(q, r)
+        
+        if max_workers <= 1 or not self.is_remote:
+            # Sequential execution for local models
+            iterator = zip(range(n), questions, rubrics)
+            if show_progress:
+                iterator = tqdm(iterator, total=n, desc="  Generating", leave=False)
+            for idx, q, r in iterator:
+                results[idx] = self.generate_answer(q, r)
+        else:
+            # Parallel execution for remote API
+            tasks = list(zip(range(n), questions, rubrics))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(generate_single, task): task[0] for task in tasks}
+                
+                if show_progress:
+                    pbar = tqdm(total=n, desc="  Generating", leave=False)
+                
+                for future in as_completed(futures):
+                    idx, result = future.result()
+                    results[idx] = result
+                    if show_progress:
+                        pbar.update(1)
+                
+                if show_progress:
+                    pbar.close()
+        
+        return results

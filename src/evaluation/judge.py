@@ -2,11 +2,22 @@ import os
 import re
 import json
 import time
+import logging
 import hashlib
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Dict, Any, Optional, Tuple
+from tqdm import tqdm
 from openai import OpenAI
 import httpx
+
+# Suppress verbose HTTP logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+# Default parallel settings
+DEFAULT_MAX_WORKERS = int(os.environ.get("GRM_ORACLE_WORKERS", 8))
 from src.utils.prompts import REVERSE_ENGINEER_RUBRIC_PROMPT, ANCHOR_EVALUATION_PROMPT, DYNAMIC_RUBRIC_EVALUATION_PROMPT
 
 # Global cache directory
@@ -46,12 +57,18 @@ DEFAULT_TIMEOUT = 300  # 5 minutes
 MAX_RETRIES = 3
 
 class Judge:
-    def __init__(self, model_name: str = "gpt-4o", api_key: str = None, api_base: str = None,
+    def __init__(self, model_name: str = None, api_key: str = None, api_base: str = None,
                  timeout: float = DEFAULT_TIMEOUT):
-        self.model_name = model_name
+        # Priority: explicit args > ORACLE_* env vars > OPENAI_* env vars
+        self.model_name = model_name or os.environ.get("ORACLE_MODEL_NAME") or os.environ.get("OPENAI_MODEL", "gpt-4o")
         self.base_timeout = timeout
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
-        self.api_base = api_base or os.environ.get("OPENAI_BASE_URL")
+        self.api_key = api_key or os.environ.get("ORACLE_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        self.api_base = api_base or os.environ.get("ORACLE_API_BASE") or os.environ.get("OPENAI_BASE_URL")
+        
+        if not self.api_key:
+            raise ValueError("No API key found. Set ORACLE_API_KEY or OPENAI_API_KEY in .env")
+        
+        print(f"Judge initialized: model={self.model_name}, base_url={self.api_base}")
         self._init_client(timeout)
     
     def _init_client(self, timeout: float):
@@ -231,6 +248,52 @@ Respond with only "YES" or "NO".
 """
         response = self._call_api(prompt, temperature=0.0).strip().upper()
         return "YES" in response
+
+    def evaluate_batch(self, questions: List[str], answers: List[str], 
+                       rubrics: List[Optional[str]] = None,
+                       show_progress: bool = False, 
+                       max_workers: int = None) -> List[float]:
+        """Evaluate multiple answers in parallel."""
+        if max_workers is None:
+            max_workers = DEFAULT_MAX_WORKERS
+        
+        n = len(questions)
+        if rubrics is None:
+            rubrics = [None] * n
+        
+        results = [0.0] * n
+        
+        def evaluate_single(args: Tuple[int, str, str, Optional[str]]) -> Tuple[int, float]:
+            idx, q, a, r = args
+            return idx, self.evaluate_answer(q, a, rubric=r)
+        
+        tasks = list(zip(range(n), questions, answers, rubrics))
+        
+        if max_workers <= 1:
+            # Sequential execution
+            iterator = tasks
+            if show_progress:
+                iterator = tqdm(iterator, desc="  Evaluating", leave=False)
+            for idx, q, a, r in iterator:
+                results[idx] = self.evaluate_answer(q, a, rubric=r)
+        else:
+            # Parallel execution
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(evaluate_single, task): task[0] for task in tasks}
+                
+                if show_progress:
+                    pbar = tqdm(total=n, desc="  Evaluating", leave=False)
+                
+                for future in as_completed(futures):
+                    idx, result = future.result()
+                    results[idx] = result
+                    if show_progress:
+                        pbar.update(1)
+                
+                if show_progress:
+                    pbar.close()
+        
+        return results
 
 # Alias for backward compatibility if needed, though we changed the class name
 Oracle = Judge

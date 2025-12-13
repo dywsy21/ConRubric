@@ -1,9 +1,15 @@
+import os
 import torch
 import numpy as np
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 from src.evaluation.judge import Oracle
 from src.models.solver import Solver
+
+# Default parallel settings
+DEFAULT_MAX_WORKERS = int(os.environ.get("GRM_REWARD_WORKERS", 8))
 
 class MetaRewardFunction:
     def __init__(self, solver_model_name: str, oracle_model_name: str, 
@@ -52,17 +58,20 @@ class MetaRewardFunction:
     def __setstate__(self, state):
         self.__dict__.update(state)
         
-    def compute_reward(self, questions: List[str], rubrics: List[str]) -> torch.Tensor:
+    def compute_reward(self, questions: List[str], rubrics: List[str], 
+                       max_workers: int = None) -> torch.Tensor:
         """
-        Computes the Consensus-Based Meta-Reward.
+        Computes the Consensus-Based Meta-Reward with parallel execution.
         
         Logic:
         1. Group inputs by Question.
         2. For each Question, we have N rubrics.
-        3. Generate N answers (one per rubric).
-        4. Cross-Evaluate: Evaluate answer A_i against Rubric R_j (for all j != i).
+        3. Generate N answers (one per rubric) - PARALLEL
+        4. Cross-Evaluate: Evaluate answer A_i against Rubric R_j (for all j != i) - PARALLEL
         5. Reward R_i = Mean(Score(A_i, R_j))
         """
+        if max_workers is None:
+            max_workers = DEFAULT_MAX_WORKERS
         
         # Group by question to handle the N samples per prompt
         # Map question -> list of (index, rubric)
@@ -72,53 +81,61 @@ class MetaRewardFunction:
             
         rewards = torch.zeros(len(questions), dtype=torch.float32)
         
-        for q, items in q_to_rubrics.items():
+        # Progress bar for questions
+        q_items = list(q_to_rubrics.items())
+        for q, items in tqdm(q_items, desc="Questions", leave=False):
             indices = [item[0] for item in items]
             current_rubrics = [item[1] for item in items]
             n = len(current_rubrics)
             
             if n < 2:
                 # Fallback if only 1 rubric per question (can't do cross-eval properly)
-                # Just evaluate against itself or generic anchor
                 print(f"Warning: Only {n} rubric(s) for question '{q[:20]}...'. Skipping cross-eval.")
                 for idx, r in zip(indices, current_rubrics):
-                    # Fallback: Generate answer and eval against Anchor Rubrics (old method)
                     ans = self.solver.generate_answer(q, r)
-                    # evaluate_answer now returns a float directly
                     score = self.oracle.evaluate_answer(q, ans) 
                     rewards[idx] = score
                 continue
 
-            # 1. Generate Answers
+            # 1. Generate Answers in PARALLEL
             # answers[i] corresponds to rubric[i]
-            answers = self.solver.generate_batch([q]*n, current_rubrics)
+            answers = self.solver.generate_batch([q]*n, current_rubrics, 
+                                                  show_progress=True, 
+                                                  max_workers=max_workers)
             
-            # 2. Cross-Evaluation Matrix
-            # matrix[i][j] = Score of Answer i evaluated by Rubric j
+            # 2. Cross-Evaluation Matrix - PARALLEL
+            # Build list of all (i, j) pairs to evaluate (excluding diagonal)
+            eval_tasks = []
+            for i in range(n):
+                for j in range(n):
+                    if i != j:
+                        eval_tasks.append((i, j, q, answers[i], current_rubrics[j]))
+            
             score_matrix = np.zeros((n, n))
             
-            for i in range(n): # Answer i
-                for j in range(n): # Rubric j
-                    if i == j:
-                        continue # Skip self-evaluation for consensus score (optional)
-                    
-                    # Evaluate Answer i against Rubric j
-                    # evaluate_answer now returns a float directly
-                    score = self.oracle.evaluate_answer(q, answers[i], rubric=current_rubrics[j])
-                    score_matrix[i][j] = score
+            def evaluate_single(args: Tuple[int, int, str, str, str]) -> Tuple[int, int, float]:
+                i, j, question, answer, rubric = args
+                score = self.oracle.evaluate_answer(question, answer, rubric=rubric)
+                return i, j, score
+            
+            # Execute evaluations in parallel
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(evaluate_single, task): task[:2] for task in eval_tasks}
+                
+                with tqdm(total=len(eval_tasks), desc="  Cross-Eval", leave=False) as pbar:
+                    for future in as_completed(futures):
+                        i, j, score = future.result()
+                        score_matrix[i][j] = score
+                        pbar.update(1)
             
             # 3. Compute Rewards
             # Reward for Rubric i is the average score of Answer i against all other Rubrics j!=i
             for i in range(n):
-                # Mean of row i, excluding diagonal (which is 0)
-                # Sum / (N-1)
                 avg_score = score_matrix[i].sum() / (n - 1)
                 rewards[indices[i]] = avg_score
                 
         return rewards
 
     def _generate_answer(self, question: str, rubric: str) -> str:
-        return self.solver.generate_answer(question, rubric)
-        # prompt = f"Rubric:\n{rubric}\n\nQuestion:\n{question}\n\nAnswer:"
-        return "Placeholder Answer" 
+        return self.solver.generate_answer(question, rubric) 
 
