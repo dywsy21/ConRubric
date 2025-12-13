@@ -24,17 +24,19 @@ cp .env.example .env
 Download all required models and datasets to the local cache.
 
 ```bash
-uv run python -m src.utils.download
+python -m src.utils.download
 ```
 
 ## Usage
+
+Do a `source .venv/bin/activate` first. 
 
 ### Phase 1: Data Preparation & Cold Start
 
 1.  **Generate Synthetic Data (Reverse Engineering)**:
 
 ```bash
-uv run python -m src.data.generate_synthetic --limit <N>  # Limit to N samples per dataset
+python -m src.data.generate_synthetic --limit <N>  # Limit to N samples per dataset
 ```
 
 This will generate `data/synthetic_rubrics.jsonl`.
@@ -42,7 +44,7 @@ This will generate `data/synthetic_rubrics.jsonl`.
 2.  **SFT Training**:
 
 ```bash
-uv run python -m src.training.sft_trainer
+python -m src.training.sft_trainer
 ```
 
 This will fine-tune the GRM on the synthetic rubrics.
@@ -52,7 +54,7 @@ This will fine-tune the GRM on the synthetic rubrics.
 1.  **Run RL Training**:
 
 ```bash
-./run_training.sh --limit 1000000
+./run_training.sh --limit 999999999
 ```
 
 This will start the RL loop using `verl` (requires `verl` to be installed).
@@ -60,5 +62,5 @@ This will start the RL loop using `verl` (requires `verl` to be installed).
 ## Benchmark
 
 ```bash
-uv run python -m src.evaluation.run_benchmark --model_path <path_to_grm> --benchmarks rewardbench ppe rmb
+python -m src.evaluation.run_benchmark --model_path <path_to_grm> --benchmarks rewardbench ppe rmb
 ```

@@ -73,6 +73,8 @@ class MetaRewardFunction:
         if max_workers is None:
             max_workers = DEFAULT_MAX_WORKERS
         
+        print(f"[MetaReward] Computing rewards for {len(questions)} samples, max_workers={max_workers}")
+        
         # Group by question to handle the N samples per prompt
         # Map question -> list of (index, rubric)
         q_to_rubrics = defaultdict(list)
@@ -83,7 +85,10 @@ class MetaRewardFunction:
         
         # Progress bar for questions
         q_items = list(q_to_rubrics.items())
-        for q, items in tqdm(q_items, desc="Questions", leave=False):
+        print(f"[MetaReward] Processing {len(q_items)} unique questions")
+        
+        for q_idx, (q, items) in enumerate(q_items):
+            print(f"[MetaReward] Question {q_idx+1}/{len(q_items)}: {len(items)} rubrics")
             indices = [item[0] for item in items]
             current_rubrics = [item[1] for item in items]
             n = len(current_rubrics)
@@ -99,9 +104,11 @@ class MetaRewardFunction:
 
             # 1. Generate Answers in PARALLEL
             # answers[i] corresponds to rubric[i]
+            print(f"[MetaReward]   Generating {n} answers...")
             answers = self.solver.generate_batch([q]*n, current_rubrics, 
-                                                  show_progress=True, 
+                                                  show_progress=False, 
                                                   max_workers=max_workers)
+            print(f"[MetaReward]   Generated {len(answers)} answers")
             
             # 2. Cross-Evaluation Matrix - PARALLEL
             # Build list of all (i, j) pairs to evaluate (excluding diagonal)
@@ -118,22 +125,33 @@ class MetaRewardFunction:
                 score = self.oracle.evaluate_answer(question, answer, rubric=rubric)
                 return i, j, score
             
-            # Execute evaluations in parallel
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Execute evaluations in parallel (or sequentially if max_workers=1)
+            print(f"[MetaReward]   Cross-evaluating {len(eval_tasks)} pairs...")
+            completed = 0
+            with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
                 futures = {executor.submit(evaluate_single, task): task[:2] for task in eval_tasks}
                 
-                with tqdm(total=len(eval_tasks), desc="  Cross-Eval", leave=False) as pbar:
-                    for future in as_completed(futures):
-                        i, j, score = future.result()
+                for future in as_completed(futures):
+                    try:
+                        i, j, score = future.result(timeout=600)  # 10 min timeout per eval
                         score_matrix[i][j] = score
-                        pbar.update(1)
+                        completed += 1
+                        if completed % 4 == 0 or completed == len(eval_tasks):
+                            print(f"[MetaReward]     Completed {completed}/{len(eval_tasks)} evals")
+                    except Exception as e:
+                        print(f"[MetaReward]     Error in eval: {e}")
+                        i_idx, j_idx = futures[future]
+                        score_matrix[i_idx][j_idx] = 0.0
             
             # 3. Compute Rewards
             # Reward for Rubric i is the average score of Answer i against all other Rubrics j!=i
             for i in range(n):
                 avg_score = score_matrix[i].sum() / (n - 1)
                 rewards[indices[i]] = avg_score
+            
+            print(f"[MetaReward]   Question {q_idx+1} done, avg rewards: {[rewards[idx].item() for idx in indices]}")
                 
+        print(f"[MetaReward] All rewards computed, mean={rewards.mean():.3f}")
         return rewards
 
     def _generate_answer(self, question: str, rubric: str) -> str:
