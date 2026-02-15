@@ -2,6 +2,8 @@
 
 This project implements the training of a General Reward Model (GRM) using Meta-Reward and Bi-level optimization.
 
+`verl` is vendored in-repo at `./verl` for direct modification and git tracking.
+
 ## Setup
 
 1.  **Install Dependencies**:
@@ -57,7 +59,7 @@ This will fine-tune the GRM on the synthetic rubrics.
 ./run_training.sh --limit 999999999
 ```
 
-This will start the RL loop using `verl` (requires `verl` to be installed).
+This will start the RL loop using the vendored `verl` under `./verl`.
 
 ## Benchmark
 
