@@ -35,6 +35,8 @@ For a given question $q$:
     *   The GRM generates $N$ candidate rubrics $\{r_1, r_2, ..., r_N\}$.
     *   *Assumption*: These rubrics represent different "views" or "complete scoring points" for the problem.
 
+*2, 3, 4 are all parts of the reward function*
+
 2.  **Execution (Answer Generation)**:
     *   For each rubric $r_i$, the Solver generates a corresponding answer $a_i$.
     *   $a_i \sim \pi_{solver}(\cdot | q, r_i)$.
