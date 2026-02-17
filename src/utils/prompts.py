@@ -11,14 +11,30 @@ Gold Answer:
 {gold_answer}
 
 Please generate a concise, actionable, and specific Rubric (set of Principles) that captures the key requirements, style, and constraints satisfied by the Gold Answer.
-The Rubric should be formatted as a list of principles.
+
+Scoring requirements:
+1. Each criterion must include an integer `points` in range [-10, 10], excluding 0.
+2. Include BOTH positive and negative criteria in the same rubric:
+   - positive criteria (points > 0): what should be done
+   - negative criteria (points < 0): common mistakes / harmful / missing behaviors to penalize
+3. Prefer 6-12 total criteria.
+4. `tags` is optional but recommended.
 
 Output Format:
 [
-    "Principle 1...",
-    "Principle 2...",
-    ...
+    {
+        "criterion": "...",
+        "points": 8,
+        "tags": ["accuracy", "completeness"]
+    },
+    {
+        "criterion": "...",
+        "points": -6,
+        "tags": ["hallucination", "safety"]
+    }
 ]
+
+Return JSON array only. Do not include markdown fences.
 """
 
 ANCHOR_EVALUATION_PROMPT = """

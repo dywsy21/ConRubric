@@ -99,7 +99,7 @@ def generate_synthetic_data(limit: int = None):
                     if not question or not gold_answer:
                         continue
                         
-                    # Reverse engineer rubric
+                    # Reverse engineer rubric with signed points (-10~10)
                     rubric = oracle.reverse_engineer_rubric(question, gold_answer)
                     
                     if rubric:

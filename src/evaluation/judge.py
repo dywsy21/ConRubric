@@ -131,26 +131,91 @@ class Judge:
         print(f"Judge all retries failed. Last error: {last_error}")
         return ""
 
-    def reverse_engineer_rubric(self, question: str, gold_answer: str) -> List[str]:
-        prompt = REVERSE_ENGINEER_RUBRIC_PROMPT.format(question=question, gold_answer=gold_answer)
-        response_text = self._call_api(prompt, temperature=0.7)
-        
-        # Simple parsing logic - assumes the model follows instructions to output a JSON list or similar
-        # In a real scenario, we'd want more robust parsing
+    def reverse_engineer_rubric(self, question: str, gold_answer: str, max_retries: int = 3) -> List[Dict[str, Any]]:
+        """
+        Reverse-engineer rubric with signed criterion points.
+        Returns list of {criterion, points, tags} where points in [-10, 10], points != 0,
+        and at least one positive + one negative item whenever possible.
+        """
+        base_prompt = REVERSE_ENGINEER_RUBRIC_PROMPT.format(question=question, gold_answer=gold_answer)
+        prompt = base_prompt
+
+        for attempt in range(max_retries):
+            response_text = self._call_api(prompt, temperature=0.4, use_cache=False)
+            rubric = self._parse_reverse_rubric_response(response_text)
+            if rubric:
+                return rubric
+
+            # Retry with stricter instruction if model failed formatting/sign-balance
+            prompt = (
+                base_prompt
+                + "\n\nIMPORTANT: You must return a JSON array with BOTH positive and negative items. "
+                + "Use integer points in [-10, 10], excluding 0."
+            )
+
+        return rubric if rubric else []
+
+    def _parse_reverse_rubric_response(self, response_text: str) -> List[Dict[str, Any]]:
+        if not response_text:
+            return []
+
         try:
-            # Attempt to find JSON-like structure
+            # Attempt JSON array extraction
             start = response_text.find('[')
             end = response_text.rfind(']') + 1
-            if start != -1 and end != -1:
+            parsed = None
+            if start != -1 and end > start:
                 json_str = response_text[start:end]
-                rubric = json.loads(json_str)
-                if isinstance(rubric, list):
-                    return rubric
-            
-            # Fallback: split by newlines if it looks like a list
+                parsed = json.loads(json_str)
+            else:
+                parsed = None
+
+            out: List[Dict[str, Any]] = []
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict):
+                        criterion = str(item.get("criterion", "")).strip()
+                        if not criterion:
+                            continue
+                        try:
+                            points = int(item.get("points", 0))
+                        except Exception:
+                            continue
+                        points = max(-10, min(10, points))
+                        if points == 0:
+                            continue
+                        tags = item.get("tags", [])
+                        if not isinstance(tags, list):
+                            tags = []
+                        out.append({"criterion": criterion, "points": points, "tags": tags})
+                    elif isinstance(item, str):
+                        # Fallback for old string-only format: assign +1
+                        criterion = item.strip()
+                        if criterion:
+                            out.append({"criterion": criterion, "points": 1, "tags": []})
+
+            if out:
+                return out
+
+            # Text fallback: parse lines like "- [+3] ..." / "- [-4] ..."
             lines = response_text.split('\n')
-            rubric = [line.strip('- ').strip() for line in lines if line.strip().startswith('-') or line.strip().startswith('*') or line[0].isdigit()]
-            return rubric
+            for line in lines:
+                line_strip = line.strip()
+                if not line_strip:
+                    continue
+                m = re.search(r"\[\s*([+-]?\d+)\s*\]", line_strip)
+                if not m:
+                    continue
+                points = int(m.group(1))
+                points = max(-10, min(10, points))
+                if points == 0:
+                    continue
+                criterion = re.sub(r"^[-*\d\.\s]*", "", line_strip)
+                criterion = re.sub(r"\[\s*[+-]?\d+\s*\]", "", criterion).strip(" -:")
+                if criterion:
+                    out.append({"criterion": criterion, "points": points, "tags": []})
+
+            return out
         except Exception as e:
             print(f"Error parsing rubric: {e}")
             return []
