@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -65,7 +66,13 @@ def _normalize_rubrics(raw_rubrics: Any) -> List[Dict[str, Any]]:
     return out
 
 
-def _load_healthbench_records(limit_per_file: Optional[int] = None, benchmark_ratio: float = 0.2, seed: int = 42, force_rebuild_split: bool = False) -> List[Dict[str, Any]]:
+def _load_healthbench_records(
+    limit_per_file: Optional[int] = None,
+    limit_total: Optional[int] = None,
+    benchmark_ratio: float = 0.2,
+    seed: int = 42,
+    force_rebuild_split: bool = False,
+) -> List[Dict[str, Any]]:
     # Load only from SFT split to avoid benchmark leakage.
     split_paths = ensure_healthbench_splits(
         output_dir="data/healthbench_splits",
@@ -83,7 +90,9 @@ def _load_healthbench_records(limit_per_file: Optional[int] = None, benchmark_ra
             if not question or not rubrics:
                 continue
             records.append({"question": question, "rubrics": rubrics, "source": item.get("source", "healthbench:sft_train")})
-            if limit_per_file is not None and len(records) >= (limit_per_file * len(HEALTHBENCH_SFT_FILES)):
+            if limit_total is not None and len(records) >= limit_total:
+                break
+            if limit_total is None and limit_per_file is not None and len(records) >= (limit_per_file * len(HEALTHBENCH_SFT_FILES)):
                 break
 
     print(f"Loaded {len(records)} HealthBench SFT rows from split file: {split_paths.sft_train}")
@@ -121,6 +130,7 @@ def _build_weighted_sft_jsonl(args, config: ProjectConfig) -> str:
         records.extend(
             _load_healthbench_records(
                 limit_per_file=args.healthbench_limit_per_file,
+                limit_total=args.healthbench_limit,
                 benchmark_ratio=args.healthbench_benchmark_ratio,
                 seed=args.healthbench_split_seed,
                 force_rebuild_split=args.rebuild_healthbench_split,
@@ -170,15 +180,18 @@ def _run_verl_sft(args, config: ProjectConfig, train_file: str):
     nproc = str(args.nproc_per_node)
 
     cmd = [
-        "torchrun",
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
         "--standalone",
         f"--nproc_per_node={nproc}",
         "-m",
         "verl.trainer.sft_trainer",
         "--config-name",
         "sft_trainer_engine",
-        f"model.partial_pretrain={config.grm_model_name}",
+        f"model.path={config.grm_model_name}",
         "model.trust_remote_code=True",
+        "+model.override_config.attn_implementation=eager",
         f"data.train_files=['{train_file}']",
         "data.val_files=null",
         "data.custom_cls.path=pkg://src.training.weighted_sft_dataset",
@@ -188,11 +201,11 @@ def _run_verl_sft(args, config: ProjectConfig, train_file: str):
         "data.pad_mode=no_padding",
         f"data.train_batch_size={args.train_batch_size}",
         f"data.micro_batch_size_per_gpu={args.micro_batch_size_per_gpu}",
-        f"data.point_alpha={args.point_alpha}",
-        f"data.negative_boost={args.negative_boost}",
-        f"data.min_weight={args.min_weight}",
-        f"data.max_weight={args.max_weight}",
-        f"data.sft_instruction_template={json.dumps(DEFAULT_SFT_INSTRUCTION_TEMPLATE)}",
+        f"+data.point_alpha={args.point_alpha}",
+        f"+data.negative_boost={args.negative_boost}",
+        f"+data.min_weight={args.min_weight}",
+        f"+data.max_weight={args.max_weight}",
+        f"+data.sft_instruction_template={json.dumps(DEFAULT_SFT_INSTRUCTION_TEMPLATE)}",
         f"optim.lr={args.lr}",
         f"trainer.total_epochs={args.epochs}",
         f"trainer.project_name={args.project_name}",
@@ -214,6 +227,7 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(description="verl-based weighted SFT using HealthBench + synthetic data")
     parser.add_argument("--no-healthbench", action="store_true")
     parser.add_argument("--no-synthetic", action="store_true")
+    parser.add_argument("--healthbench-limit", type=int, default=None, help="Total number of HealthBench SFT rows to include")
     parser.add_argument("--healthbench-limit-per-file", type=int, default=None)
     parser.add_argument("--synthetic-path", type=str, default=None)
     parser.add_argument("--synthetic-limit", type=int, default=None)

@@ -92,7 +92,11 @@ def run_healthbench_rubric_quality(
     split_seed: int = 42,
     max_prompts: int = None,
     max_completions_per_prompt: int = 8,
+    eval_workers: int = None,
 ):
+    if eval_workers is None:
+        eval_workers = int(os.environ.get("GRM_ORACLE_WORKERS", "8"))
+
     split_paths = ensure_healthbench_splits(
         output_dir="data/healthbench_splits",
         benchmark_ratio=benchmark_ratio,
@@ -146,14 +150,30 @@ def run_healthbench_rubric_quality(
         pred_scores = []
         label_scores = []
 
+        questions_batch = []
+        completions_batch = []
+        rubrics_batch = []
+
         for r in rows:
             completion = r.get("completion", "")
             label = _label_score(r.get("binary_labels", []))
-            pred = judge.evaluate_answer(prompt_text, completion, rubric)
-            pred_scores.append(float(pred))
+            questions_batch.append(prompt_text)
+            completions_batch.append(completion)
+            rubrics_batch.append(rubric)
             label_scores.append(float(label))
-            all_pred_scores.append(float(pred))
             all_label_scores.append(float(label))
+
+        pred_scores = [
+            float(x)
+            for x in judge.evaluate_batch(
+                questions=questions_batch,
+                answers=completions_batch,
+                rubrics=rubrics_batch,
+                show_progress=False,
+                max_workers=eval_workers,
+            )
+        ]
+        all_pred_scores.extend(pred_scores)
 
         pair_acc, resolution, n_pairs = _pairwise_metrics(pred_scores, label_scores)
 
@@ -203,6 +223,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default="results/benchmarks")
     parser.add_argument("--max_prompts", type=int, default=None)
     parser.add_argument("--max_completions_per_prompt", type=int, default=8)
+    parser.add_argument("--eval_workers", type=int, default=int(os.environ.get("GRM_ORACLE_WORKERS", "8")))
     parser.add_argument("--healthbench_benchmark_ratio", type=float, default=0.2)
     parser.add_argument("--healthbench_split_seed", type=int, default=42)
     args = parser.parse_args()
@@ -223,6 +244,7 @@ def main():
         split_seed=args.healthbench_split_seed,
         max_prompts=args.max_prompts,
         max_completions_per_prompt=args.max_completions_per_prompt,
+        eval_workers=args.eval_workers,
     )
 
 

@@ -2,6 +2,7 @@ import os
 import argparse
 import json
 from pathlib import Path
+from typing import List, Dict, Any
 from dotenv import load_dotenv
 
 # Load env vars BEFORE importing HuggingFace libraries
@@ -26,7 +27,40 @@ from src.models.grm import RubricGenerator
 from src.evaluation.judge import Judge
 from src.evaluation.run_rubric_quality_benchmark import run_healthbench_rubric_quality
 
-def run_reward_bench(grm: RubricGenerator, judge: Judge, num_samples: int = None, output_dir: str = "results"):
+
+def _score_pairs_in_parallel(judge: Judge, pairs: List[Dict[str, Any]], max_workers: int) -> List[Dict[str, Any]]:
+    """Score (chosen, rejected) pairs in one batched parallel call to fully use remote vLLM."""
+    if not pairs:
+        return []
+
+    questions = []
+    answers = []
+    rubrics = []
+    for p in pairs:
+        questions.extend([p["prompt"], p["prompt"]])
+        answers.extend([p["chosen"], p["rejected"]])
+        rubrics.extend([p["rubric"], p["rubric"]])
+
+    scores = judge.evaluate_batch(
+        questions=questions,
+        answers=answers,
+        rubrics=rubrics,
+        show_progress=False,
+        max_workers=max_workers,
+    )
+
+    out = []
+    for i, p in enumerate(pairs):
+        out.append(
+            {
+                **p,
+                "score_chosen": float(scores[2 * i]),
+                "score_rejected": float(scores[2 * i + 1]),
+            }
+        )
+    return out
+
+def run_reward_bench(grm: RubricGenerator, judge: Judge, num_samples: int = None, output_dir: str = "results", eval_batch_size: int = 32, max_workers: int = 8):
     print(f"\nRunning RewardBench Evaluation...")
     try:
         # 'filtered' split is commonly used for reliable evaluation
@@ -45,46 +79,58 @@ def run_reward_bench(grm: RubricGenerator, judge: Judge, num_samples: int = None
     # Group by subset for detailed reporting
     subset_stats = {}
 
+    pending_pairs = []
+
+    def flush_pending():
+        nonlocal correct, total, results, pending_pairs, subset_stats
+        if not pending_pairs:
+            return
+        scored = _score_pairs_in_parallel(judge, pending_pairs, max_workers=max_workers)
+        for item in scored:
+            score_chosen = item["score_chosen"]
+            score_rejected = item["score_rejected"]
+            subset = item["subset"]
+
+            is_correct = False
+            val = 0.0
+            if score_chosen > score_rejected:
+                correct += 1
+                val = 1.0
+                is_correct = True
+            elif score_chosen == score_rejected:
+                correct += 0.5
+                val = 0.5
+
+            total += 1
+            if subset not in subset_stats:
+                subset_stats[subset] = {"correct": 0, "total": 0}
+            subset_stats[subset]["correct"] += val
+            subset_stats[subset]["total"] += 1
+
+            results.append({
+                "prompt": item["prompt"],
+                "rubric": item["rubric"],
+                "score_chosen": score_chosen,
+                "score_rejected": score_rejected,
+                "is_correct": is_correct,
+                "subset": subset,
+            })
+        pending_pairs = []
+
     for row in tqdm(dataset, desc="RewardBench"):
         prompt = row['prompt']
-        chosen = row['chosen']
-        rejected = row['rejected']
-        subset = row.get('subset', 'unknown')
-        
-        # 1. Generate Rubric
         rubric = grm.generate_rubric(prompt)
-        
-        # 2. Score Chosen and Rejected
-        # Judge expects: evaluate_answer(question, answer, rubric) -> score
-        score_chosen = judge.evaluate_answer(prompt, chosen, rubric)
-        score_rejected = judge.evaluate_answer(prompt, rejected, rubric)
-        
-        is_correct = False
-        val = 0.0
-        if score_chosen > score_rejected:
-            correct += 1
-            val = 1.0
-            is_correct = True
-        elif score_chosen == score_rejected:
-            correct += 0.5 # Tie
-            val = 0.5
-            
-        total += 1
-        
-        # Update subset stats
-        if subset not in subset_stats:
-            subset_stats[subset] = {"correct": 0, "total": 0}
-        subset_stats[subset]["correct"] += val
-        subset_stats[subset]["total"] += 1
-        
-        results.append({
+        pending_pairs.append({
             "prompt": prompt,
+            "chosen": row['chosen'],
+            "rejected": row['rejected'],
             "rubric": rubric,
-            "score_chosen": score_chosen,
-            "score_rejected": score_rejected,
-            "is_correct": is_correct,
-            "subset": subset
+            "subset": row.get('subset', 'unknown'),
         })
+        if len(pending_pairs) >= eval_batch_size:
+            flush_pending()
+
+    flush_pending()
         
     accuracy = correct / total if total > 0 else 0
     print(f"RewardBench Overall Accuracy: {accuracy:.2%} ({correct}/{total})")
@@ -102,7 +148,7 @@ def run_reward_bench(grm: RubricGenerator, judge: Judge, num_samples: int = None
             "details": results
         }, f, indent=2)
 
-def run_ppe_benchmark(grm: RubricGenerator, judge: Judge, num_samples: int = None, output_dir: str = "results"):
+def run_ppe_benchmark(grm: RubricGenerator, judge: Judge, num_samples: int = None, output_dir: str = "results", eval_batch_size: int = 32, max_workers: int = 8):
     print("\nRunning PPE Benchmark (using lmarena-ai/PPE-Debug)...")
     try:
         dataset = load_dataset("lmarena-ai/PPE-Debug", split="test")
@@ -117,6 +163,38 @@ def run_ppe_benchmark(grm: RubricGenerator, judge: Judge, num_samples: int = Non
     correct = 0
     total = 0
     
+    pending_pairs = []
+
+    def flush_pending():
+        nonlocal correct, total, results, pending_pairs
+        if not pending_pairs:
+            return
+        scored = _score_pairs_in_parallel(judge, pending_pairs, max_workers=max_workers)
+        for item in scored:
+            score_chosen = item["score_chosen"]
+            score_rejected = item["score_rejected"]
+
+            is_correct = False
+            val = 0.0
+            if score_chosen > score_rejected:
+                correct += 1
+                val = 1.0
+                is_correct = True
+            elif score_chosen == score_rejected:
+                correct += 0.5
+                val = 0.5
+
+            total += 1
+            results.append({
+                "prompt": item["prompt"],
+                "rubric": item["rubric"],
+                "score_chosen": score_chosen,
+                "score_rejected": score_rejected,
+                "is_correct": is_correct,
+                "winner": item["winner"],
+            })
+        pending_pairs = []
+
     for row in tqdm(dataset, desc="PPE"):
         prompt = row['prompt']
         response_1 = row['response_1']
@@ -129,33 +207,18 @@ def run_ppe_benchmark(grm: RubricGenerator, judge: Judge, num_samples: int = Non
         chosen = response_1 if winner == 'model_a' else response_2
         rejected = response_2 if winner == 'model_a' else response_1
         
-        # 1. Generate Rubric
         rubric = grm.generate_rubric(prompt)
-        
-        # 2. Score
-        score_chosen = judge.evaluate_answer(prompt, chosen, rubric)
-        score_rejected = judge.evaluate_answer(prompt, rejected, rubric)
-        
-        is_correct = False
-        val = 0.0
-        if score_chosen > score_rejected:
-            correct += 1
-            val = 1.0
-            is_correct = True
-        elif score_chosen == score_rejected:
-            correct += 0.5
-            val = 0.5
-            
-        total += 1
-        
-        results.append({
+        pending_pairs.append({
             "prompt": prompt,
+            "chosen": chosen,
+            "rejected": rejected,
             "rubric": rubric,
-            "score_chosen": score_chosen,
-            "score_rejected": score_rejected,
-            "is_correct": is_correct,
-            "winner": winner
+            "winner": winner,
         })
+        if len(pending_pairs) >= eval_batch_size:
+            flush_pending()
+
+    flush_pending()
         
     accuracy = correct / total if total > 0 else 0
     print(f"PPE Overall Accuracy: {accuracy:.2%} ({correct}/{total})")
@@ -167,7 +230,7 @@ def run_ppe_benchmark(grm: RubricGenerator, judge: Judge, num_samples: int = Non
             "details": results
         }, f, indent=2)
 
-def run_rmb_benchmark(grm: RubricGenerator, judge: Judge, num_samples: int = None, output_dir: str = "results"):
+def run_rmb_benchmark(grm: RubricGenerator, judge: Judge, num_samples: int = None, output_dir: str = "results", eval_batch_size: int = 32, max_workers: int = 8):
     print("\nRunning RMB Benchmark (using dd101bb/RMB_dataset)...")
     try:
         dataset = load_dataset("dd101bb/RMB_dataset", split="pairwise")
@@ -183,6 +246,44 @@ def run_rmb_benchmark(grm: RubricGenerator, judge: Judge, num_samples: int = Non
     total = 0
     
     subset_stats = {}
+
+    pending_pairs = []
+
+    def flush_pending():
+        nonlocal correct, total, results, pending_pairs, subset_stats
+        if not pending_pairs:
+            return
+        scored = _score_pairs_in_parallel(judge, pending_pairs, max_workers=max_workers)
+        for item in scored:
+            score_chosen = item["score_chosen"]
+            score_rejected = item["score_rejected"]
+            subset = item["subset"]
+
+            is_correct = False
+            val = 0.0
+            if score_chosen > score_rejected:
+                correct += 1
+                val = 1.0
+                is_correct = True
+            elif score_chosen == score_rejected:
+                correct += 0.5
+                val = 0.5
+
+            total += 1
+            if subset not in subset_stats:
+                subset_stats[subset] = {"correct": 0, "total": 0}
+            subset_stats[subset]["correct"] += val
+            subset_stats[subset]["total"] += 1
+
+            results.append({
+                "prompt": item["prompt"],
+                "rubric": item["rubric"],
+                "score_chosen": score_chosen,
+                "score_rejected": score_rejected,
+                "is_correct": is_correct,
+                "category": item["category"],
+            })
+        pending_pairs = []
 
     for row in tqdm(dataset, desc="RMB"):
         # Extract prompt from conversation
@@ -209,43 +310,20 @@ def run_rmb_benchmark(grm: RubricGenerator, judge: Judge, num_samples: int = Non
         
         category = row.get('category_path', 'unknown')
         
-        # 1. Generate Rubric
         rubric = grm.generate_rubric(prompt)
-        
-        # 2. Score
-        score_chosen = judge.evaluate_answer(prompt, chosen, rubric)
-        score_rejected = judge.evaluate_answer(prompt, rejected, rubric)
-        
-        is_correct = False
-        val = 0.0
-        if score_chosen > score_rejected:
-            correct += 1
-            val = 1.0
-            is_correct = True
-        elif score_chosen == score_rejected:
-            correct += 0.5
-            val = 0.5
-            
-        total += 1
-        
-        # Update subset stats
-        # category_path looks like 'Pairwise_set/Harmlessness/S1'
-        # Let's group by the second component (Harmlessness, Helpfulness, etc.)
         subset = category.split('/')[1] if '/' in category else category
-        
-        if subset not in subset_stats:
-            subset_stats[subset] = {"correct": 0, "total": 0}
-        subset_stats[subset]["correct"] += val
-        subset_stats[subset]["total"] += 1
-        
-        results.append({
+        pending_pairs.append({
             "prompt": prompt,
+            "chosen": chosen,
+            "rejected": rejected,
             "rubric": rubric,
-            "score_chosen": score_chosen,
-            "score_rejected": score_rejected,
-            "is_correct": is_correct,
-            "category": category
+            "category": category,
+            "subset": subset,
         })
+        if len(pending_pairs) >= eval_batch_size:
+            flush_pending()
+
+    flush_pending()
         
     accuracy = correct / total if total > 0 else 0
     print(f"RMB Overall Accuracy: {accuracy:.2%} ({correct}/{total})")
@@ -269,6 +347,8 @@ if __name__ == "__main__":
     parser.add_argument("--benchmarks", type=str, nargs="+", default=["rewardbench"], help="Benchmarks to run: rewardbench, ppe, rmb, healthbench_rubric")
     parser.add_argument("--num_samples", type=int, default=None, help="Number of samples to run (for debugging)")
     parser.add_argument("--output_dir", type=str, default="results/benchmarks", help="Output directory")
+    parser.add_argument("--eval_batch_size", type=int, default=32, help="Number of pairwise items per batched judge scoring call")
+    parser.add_argument("--eval_workers", type=int, default=int(os.getenv("GRM_ORACLE_WORKERS", "8")), help="Parallel workers for judge API calls")
     parser.add_argument("--healthbench_benchmark_ratio", type=float, default=0.2, help="Reserved prompt ratio for HealthBench rubric benchmark")
     parser.add_argument("--healthbench_split_seed", type=int, default=42, help="Split seed to guarantee no SFT/benchmark leakage")
     
@@ -284,13 +364,13 @@ if __name__ == "__main__":
     )
     
     if "rewardbench" in args.benchmarks:
-        run_reward_bench(grm, judge, args.num_samples, args.output_dir)
+        run_reward_bench(grm, judge, args.num_samples, args.output_dir, eval_batch_size=args.eval_batch_size, max_workers=args.eval_workers)
         
     if "ppe" in args.benchmarks:
-        run_ppe_benchmark(grm, judge, args.num_samples, args.output_dir)
+        run_ppe_benchmark(grm, judge, args.num_samples, args.output_dir, eval_batch_size=args.eval_batch_size, max_workers=args.eval_workers)
         
     if "rmb" in args.benchmarks:
-        run_rmb_benchmark(grm, judge, args.num_samples, args.output_dir)
+        run_rmb_benchmark(grm, judge, args.num_samples, args.output_dir, eval_batch_size=args.eval_batch_size, max_workers=args.eval_workers)
 
     if "healthbench_rubric" in args.benchmarks:
         run_healthbench_rubric_quality(
@@ -301,4 +381,5 @@ if __name__ == "__main__":
             split_seed=args.healthbench_split_seed,
             max_prompts=args.num_samples,
             max_completions_per_prompt=8,
+            eval_workers=args.eval_workers,
         )
