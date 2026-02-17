@@ -2,7 +2,7 @@ refs
 .venv
 **/__pycache__
 **/*.pyc
-data
+/data/
 .env
 uv.lock
 wandb

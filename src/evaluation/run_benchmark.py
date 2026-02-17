@@ -24,6 +24,7 @@ from datasets import load_dataset
 from src.config import ProjectConfig
 from src.models.grm import RubricGenerator
 from src.evaluation.judge import Judge
+from src.evaluation.run_rubric_quality_benchmark import run_healthbench_rubric_quality
 
 def run_reward_bench(grm: RubricGenerator, judge: Judge, num_samples: int = None, output_dir: str = "results"):
     print(f"\nRunning RewardBench Evaluation...")
@@ -265,9 +266,11 @@ def run_rmb_benchmark(grm: RubricGenerator, judge: Judge, num_samples: int = Non
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, required=True, help="Path to the trained GRM model")
-    parser.add_argument("--benchmarks", type=str, nargs="+", default=["rewardbench"], help="Benchmarks to run: rewardbench, ppe, rmb")
+    parser.add_argument("--benchmarks", type=str, nargs="+", default=["rewardbench"], help="Benchmarks to run: rewardbench, ppe, rmb, healthbench_rubric")
     parser.add_argument("--num_samples", type=int, default=None, help="Number of samples to run (for debugging)")
     parser.add_argument("--output_dir", type=str, default="results/benchmarks", help="Output directory")
+    parser.add_argument("--healthbench_benchmark_ratio", type=float, default=0.2, help="Reserved prompt ratio for HealthBench rubric benchmark")
+    parser.add_argument("--healthbench_split_seed", type=int, default=42, help="Split seed to guarantee no SFT/benchmark leakage")
     
     args = parser.parse_args()
     
@@ -288,3 +291,14 @@ if __name__ == "__main__":
         
     if "rmb" in args.benchmarks:
         run_rmb_benchmark(grm, judge, args.num_samples, args.output_dir)
+
+    if "healthbench_rubric" in args.benchmarks:
+        run_healthbench_rubric_quality(
+            grm=grm,
+            judge=judge,
+            output_dir=args.output_dir,
+            benchmark_ratio=args.healthbench_benchmark_ratio,
+            split_seed=args.healthbench_split_seed,
+            max_prompts=args.num_samples,
+            max_completions_per_prompt=8,
+        )

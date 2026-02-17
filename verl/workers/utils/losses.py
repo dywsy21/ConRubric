@@ -31,6 +31,8 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     log_prob = model_output["log_probs"]
 
+    token_loss_weight = data.get("token_loss_weight", None)
+
     if pad_mode == DatasetPadMode.NO_PADDING:
         # log_prob and loss mask are nested tensors of shape [bsz, j1]
         # for each sample, loss mask shape is [1, prompt_length + response_length]
@@ -42,13 +44,35 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         # left-shift the loss mask by one token to align with log_prob
         loss_mask_flatten = torch.roll(loss_mask_flatten, shifts=-1, dims=0)
 
-        # NOTE: loss is averaged over all tokens in the batch across all data parallel groups,
-        # For FSDP backend, the loss is directly used for backward; while for Megatron backend,
-        # the loss should be scaled by `num_microbatches` for pp schedule.
-        loss = -masked_sum(log_prob_flatten, loss_mask_flatten) / batch_num_tokens * dp_size
+        # optional criterion-level weighting (e.g., HealthBench rubric points)
+        if token_loss_weight is not None:
+            token_weight_flatten = token_loss_weight.values()
+            token_weight_flatten = torch.roll(token_weight_flatten, shifts=-1, dims=0)
+            weighted_mask_flatten = loss_mask_flatten * token_weight_flatten
+
+            weighted_token_num = weighted_mask_flatten.sum()
+            if dp_group is not None and torch.distributed.is_initialized():
+                torch.distributed.all_reduce(weighted_token_num, op=torch.distributed.ReduceOp.SUM, group=dp_group)
+            weighted_token_num = torch.clamp(weighted_token_num, min=1e-6)
+
+            loss = -masked_sum(log_prob_flatten, weighted_mask_flatten) / weighted_token_num
+        else:
+            # NOTE: loss is averaged over all tokens in the batch across all data parallel groups,
+            # For FSDP backend, the loss is directly used for backward; while for Megatron backend,
+            # the loss should be scaled by `num_microbatches` for pp schedule.
+            loss = -masked_sum(log_prob_flatten, loss_mask_flatten) / batch_num_tokens * dp_size
+
     else:
         response_mask = data["response_mask"].to(bool)
-        loss = -masked_sum(log_prob, response_mask) / batch_num_tokens * dp_size
+        if token_loss_weight is not None:
+            # right/left-right padding path can also support weighting if response-aligned tensor is provided
+            weighted_mask = response_mask.float() * token_loss_weight[:, -response_mask.shape[1] :]
+            weighted_token_num = torch.clamp(weighted_mask.sum(), min=1e-6)
+            if dp_group is not None and torch.distributed.is_initialized():
+                torch.distributed.all_reduce(weighted_token_num, op=torch.distributed.ReduceOp.SUM, group=dp_group)
+            loss = -masked_sum(log_prob, weighted_mask) / weighted_token_num
+        else:
+            loss = -masked_sum(log_prob, response_mask) / batch_num_tokens * dp_size
 
     return loss, {}
 
