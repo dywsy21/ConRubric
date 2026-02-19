@@ -2,36 +2,26 @@
 
 This project implements the training of a General Reward Model (GRM) using Meta-Reward and Bi-level optimization.
 
-`verl` is vendored in-repo at `./verl` for direct modification and git tracking.
+`verl` is vendored in-repo at `./verl`. It is effectively a forked and modified version.
 
 ## Setup
-
-1.  **Install Dependencies**:
 
 ```bash
 # install cuda 12.9 first, make sure nvcc, etc. are on the PATH
 uv venv
 uv pip install .
-```
 
-2.  **Environment Variables**:
-    
-```bash
 cp .env.example .env
 # And then fill in the .env file
-```
 
-3.  **Download Resources**:
-
-Download all required models and datasets to the local cache.
-
-```bash
+# Optional: download all relevant things first (models, datasets)
 python -m src.utils.download
+
 ```
 
 ## Usage
 
-Do a `source .venv/bin/activate` first. 
+Please `source .venv/bin/activate` first. 
 
 ### Data Preparation
 
@@ -62,9 +52,3 @@ Fine-tunes the GRM on the weighted SFT mix with pre/post benchmarking.
 ```
 
 Runs the DAPO RL loop using the vendored `verl` under `./verl`.
-
-## Benchmark
-
-```bash
-python -m src.evaluation.run_benchmark --model_path <path_to_grm> --benchmarks rewardbench ppe rmb
-```

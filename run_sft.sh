@@ -259,9 +259,11 @@ if should_run "compare"; then
 
   run_step "5/6 Generate pre/post rubric comparison (>$BENCH_NUM_SAMPLES same prompts)"
   "$PYTHON_BIN" -m src.evaluation.build_rubric_comparison \
+    --pre_dir "$PRE_DIR" \
+    --post_dir "$POST_DIR" \
     --pre_model "$BASE_MODEL" \
     --post_model "$POST_MODEL_PATH" \
-    --num_samples "$BENCH_NUM_SAMPLES" \
+    --num_rubric_samples 10 \
     --output_md "$COMPARISON_MD" \
     --output_jsonl "$COMPARISON_JSONL"
 fi
