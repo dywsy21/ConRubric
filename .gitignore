@@ -6,12 +6,6 @@ refs
 .env
 uv.lock
 wandb
-outputs
-output
-cache
-rl.log
-checkpoints
-TODO.md
-verl.md
-results
-sft_writeup.md
+out/
+*.log
+docs

@@ -10,6 +10,7 @@ from huggingface_hub import hf_hub_download
 
 from src.config import ProjectConfig
 from src.data.prepare_healthbench import ensure_healthbench_splits
+from src.utils.prompts import RUBRIC_GENERATION_PROMPT
 
 load_dotenv()
 
@@ -19,13 +20,6 @@ HEALTHBENCH_SFT_FILES = [
     "consensus_2025-05-09-20-00-46.jsonl",
     "hard_2025-05-08-21-00-10.jsonl",
 ]
-
-DEFAULT_SFT_INSTRUCTION_TEMPLATE = (
-    "Please generate a comprehensive evaluation rubric for the following user question. "
-    "Output each criterion on a new line with signed points in the format: "
-    "- [+/-points] criterion | tags: ...\n\n"
-    "Question:\n{question}"
-)
 
 
 def _prompt_to_text(prompt: Any) -> str:
@@ -150,7 +144,7 @@ def _build_weighted_sft_jsonl(args, config: ProjectConfig) -> str:
         for i in range(n):
             r = records[i]
             question = r["question"]
-            prompt = DEFAULT_SFT_INSTRUCTION_TEMPLATE.format(question=question)
+            prompt = RUBRIC_GENERATION_PROMPT.format(question=question)
             rubrics = r.get("rubrics", [])
             print("=" * 80)
             print(f"[Sample {i + 1}] source={r.get('source', 'unknown')}")
@@ -205,7 +199,7 @@ def _run_verl_sft(args, config: ProjectConfig, train_file: str):
         f"+data.negative_boost={args.negative_boost}",
         f"+data.min_weight={args.min_weight}",
         f"+data.max_weight={args.max_weight}",
-        f"+data.sft_instruction_template={json.dumps(DEFAULT_SFT_INSTRUCTION_TEMPLATE)}",
+        f"+data.sft_instruction_template={json.dumps(RUBRIC_GENERATION_PROMPT)}",
         f"optim.lr={args.lr}",
         f"trainer.total_epochs={args.epochs}",
         f"trainer.project_name={args.project_name}",
@@ -247,7 +241,7 @@ def build_arg_parser():
 
     parser.add_argument("--project-name", type=str, default="grm-sft")
     parser.add_argument("--experiment-name", type=str, default="healthbench_weighted")
-    parser.add_argument("--output-dir", type=str, default="checkpoints/sft_healthbench_weighted")
+    parser.add_argument("--output-dir", type=str, default="out/sft")
     parser.add_argument("--save-freq", type=int, default=-1)
     parser.add_argument("--test-freq", type=int, default=-1)
     parser.add_argument("--prepare-only", action="store_true", help="Only prepare mixed SFT jsonl, do not launch training")

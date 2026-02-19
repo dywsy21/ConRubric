@@ -2,6 +2,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from typing import List, Optional
 
+from src.utils.prompts import RUBRIC_GENERATION_PROMPT
+
 class RubricGenerator:
     def __init__(self, model_name_or_path: str, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
         self.device = device
@@ -22,12 +24,8 @@ class RubricGenerator:
         """
         Generates a rubric for the given question.
         """
-        # Simple prompt for now, should match training format
-        prompt = f"""User: Create a detailed scoring rubric (Principles) for the following question.
-Question: {question}
-
-Assistant: Here is the scoring rubric:
-"""
+        # Use the same prompt template as SFT/RL training
+        prompt = RUBRIC_GENERATION_PROMPT.format(question=question)
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         
         with torch.no_grad():
@@ -40,9 +38,9 @@ Assistant: Here is the scoring rubric:
             
         generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
         
-        # Extract the rubric part
-        if "Assistant: Here is the scoring rubric:" in generated_text:
-            return generated_text.split("Assistant: Here is the scoring rubric:")[-1].strip()
+        # Strip the input prompt from the generated text
+        if generated_text.startswith(prompt):
+            return generated_text[len(prompt):].strip()
         return generated_text.strip()
 
     def generate_batch(self, questions: List[str]) -> List[str]:

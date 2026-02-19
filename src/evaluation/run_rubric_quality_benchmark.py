@@ -220,7 +220,7 @@ def run_healthbench_rubric_quality(
 def main():
     parser = argparse.ArgumentParser(description="Fine-grained rubric quality benchmark for GRM on HealthBench")
     parser.add_argument("--model_path", type=str, required=True)
-    parser.add_argument("--output_dir", type=str, default="results/benchmarks")
+    parser.add_argument("--output_dir", type=str, default="out/bench")
     parser.add_argument("--max_prompts", type=int, default=None)
     parser.add_argument("--max_completions_per_prompt", type=int, default=8)
     parser.add_argument("--eval_workers", type=int, default=int(os.environ.get("GRM_ORACLE_WORKERS", "8")))

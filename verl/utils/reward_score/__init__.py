@@ -41,6 +41,9 @@ def default_compute_score(
     Raises:
         NotImplementedError: If the reward function is not implemented for the given data source.
     """
+    # Ensure data_source is a plain str (may arrive as np.str_ from Parquet/numpy)
+    data_source = str(data_source) if data_source is not None else ""
+
     if data_source == "openai/gsm8k":
         from . import gsm8k
 

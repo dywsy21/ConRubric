@@ -419,7 +419,7 @@ class RayPPOTrainer:
             f"{len(self.val_dataloader)}"
         )
 
-        total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
+        total_training_steps = len(self.train_dataloader) * int(self.config.trainer.total_epochs)
 
         if self.config.trainer.total_training_steps is not None:
             total_training_steps = self.config.trainer.total_training_steps

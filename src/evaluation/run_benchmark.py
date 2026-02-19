@@ -346,7 +346,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", type=str, required=True, help="Path to the trained GRM model")
     parser.add_argument("--benchmarks", type=str, nargs="+", default=["rewardbench"], help="Benchmarks to run: rewardbench, ppe, rmb, healthbench_rubric")
     parser.add_argument("--num_samples", type=int, default=None, help="Number of samples to run (for debugging)")
-    parser.add_argument("--output_dir", type=str, default="results/benchmarks", help="Output directory")
+    parser.add_argument("--output_dir", type=str, default="out/bench", help="Output directory")
     parser.add_argument("--eval_batch_size", type=int, default=32, help="Number of pairwise items per batched judge scoring call")
     parser.add_argument("--eval_workers", type=int, default=int(os.getenv("GRM_ORACLE_WORKERS", "8")), help="Parallel workers for judge API calls")
     parser.add_argument("--healthbench_benchmark_ratio", type=float, default=0.2, help="Reserved prompt ratio for HealthBench rubric benchmark")

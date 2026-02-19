@@ -1,0 +1,174 @@
+"""Prepare RL training data (verl-compatible parquet).
+
+Merges two sources — synthetic rubrics and HealthBench SFT split — into a
+single parquet file that verl's RL dataset loader can consume.
+
+The HealthBench *benchmark* split (20 %) is excluded to avoid evaluation leakage.
+
+Usage:
+    python -m src.scripts.prepare_rl_data [--synthetic-limit N] [--healthbench-limit N]
+"""
+
+import argparse
+import json
+import os
+
+import pandas as pd
+
+from src.data.prepare_healthbench import ensure_healthbench_splits
+from src.utils.prompts import RUBRIC_GENERATION_PROMPT
+
+OUTPUT_PATH = "data/rl_train.parquet"
+
+
+# ── helpers ───────────────────────────────────────────────────────────────
+def _format_rubric_item(item) -> str:
+    if isinstance(item, dict):
+        criterion = str(item.get("criterion", "")).strip()
+        points = item.get("points", None)
+        if points is None:
+            return f"- {criterion}" if criterion else ""
+        sign = "+" if float(points) > 0 else ""
+        return f"- [{sign}{points}] {criterion}" if criterion else ""
+    if isinstance(item, str):
+        text = item.strip()
+        return f"- {text}" if text else ""
+    return ""
+
+
+def _make_row(question: str, rubric_items: list, source: str, gold_answer: str = "") -> dict:
+    """Build a single verl-compatible row."""
+    prompt_messages = [
+        {
+            "role": "user",
+            "content": RUBRIC_GENERATION_PROMPT.format(question=question),
+        }
+    ]
+
+    rubric_lines = [_format_rubric_item(r) for r in rubric_items]
+    rubric_lines = [ln for ln in rubric_lines if ln]
+    rubric_text = "\n".join(rubric_lines)
+
+    return {
+        "prompt": prompt_messages,
+        "response": rubric_text,
+        "question": question,
+        "gold_answer": gold_answer,
+        "data_source": source,
+        "reward_model": {
+            "style": "rule",
+            "ground_truth": {
+                "question": question,
+                "gold_answer": gold_answer,
+            },
+        },
+        "extra_info": {
+            "question": question,
+        },
+    }
+
+
+# ── loaders ───────────────────────────────────────────────────────────────
+def _load_synthetic(path: str, limit: int | None = None) -> list[dict]:
+    if not os.path.exists(path):
+        print(f"[prepare_rl_data] Synthetic file not found: {path}")
+        return []
+
+    rows: list[dict] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            question = (item.get("question") or "").strip()
+            rubric_list = item.get("rubric", [])
+            if not question or not rubric_list:
+                continue
+            rows.append(
+                _make_row(
+                    question=question,
+                    rubric_items=rubric_list,
+                    source="grm_synthetic",
+                    gold_answer=item.get("gold_answer", ""),
+                )
+            )
+            if limit is not None and len(rows) >= limit:
+                break
+
+    print(f"[prepare_rl_data] Loaded {len(rows)} synthetic rows from {path}")
+    return rows
+
+
+def _load_healthbench(limit: int | None = None) -> list[dict]:
+    """Load HealthBench SFT-split rows (benchmark split is excluded)."""
+    split_paths = ensure_healthbench_splits(
+        output_dir="data/healthbench_splits",
+        benchmark_ratio=0.2,
+        seed=42,
+    )
+
+    rows: list[dict] = []
+    with open(split_paths.sft_train, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            question = (item.get("question") or "").strip()
+            rubric_items = item.get("rubrics", [])
+            if not question or not rubric_items:
+                continue
+            rows.append(
+                _make_row(
+                    question=question,
+                    rubric_items=rubric_items,
+                    source=item.get("source", "healthbench"),
+                    gold_answer="",
+                )
+            )
+            if limit is not None and len(rows) >= limit:
+                break
+
+    print(f"[prepare_rl_data] Loaded {len(rows)} HealthBench SFT-split rows from {split_paths.sft_train}")
+    return rows
+
+
+# ── main ──────────────────────────────────────────────────────────────────
+def prepare(args: argparse.Namespace) -> None:
+    synthetic_path = args.synthetic_path or "data/synthetic_rubrics.jsonl"
+    output_path = args.output or OUTPUT_PATH
+
+    rows: list[dict] = []
+
+    if not args.no_synthetic:
+        rows.extend(_load_synthetic(synthetic_path, limit=args.synthetic_limit))
+
+    if not args.no_healthbench:
+        rows.extend(_load_healthbench(limit=args.healthbench_limit))
+
+    if not rows:
+        print("[prepare_rl_data] No data found. Make sure at least one source exists.")
+        return
+
+    df = pd.DataFrame(rows)
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    df.to_parquet(output_path)
+
+    source_counts = df["data_source"].value_counts().to_dict()
+    print(f"[prepare_rl_data] Wrote {len(df)} rows to {output_path}")
+    print(f"[prepare_rl_data] Source breakdown: {source_counts}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Prepare RL training parquet from synthetic + HealthBench data")
+    parser.add_argument("--synthetic-path", type=str, default=None, help="Path to synthetic_rubrics.jsonl")
+    parser.add_argument("--synthetic-limit", type=int, default=None, help="Max synthetic rows")
+    parser.add_argument("--healthbench-limit", type=int, default=None, help="Max HealthBench rows")
+    parser.add_argument("--no-synthetic", action="store_true", help="Skip synthetic data")
+    parser.add_argument("--no-healthbench", action="store_true", help="Skip HealthBench data")
+    parser.add_argument("--output", type=str, default=OUTPUT_PATH, help=f"Output parquet path (default: {OUTPUT_PATH})")
+    args = parser.parse_args()
+    prepare(args)
+
+
+if __name__ == "__main__":
+    main()

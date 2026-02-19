@@ -33,33 +33,35 @@ python -m src.utils.download
 
 Do a `source .venv/bin/activate` first. 
 
-### Phase 1: Data Preparation & Cold Start
+### Data Preparation
 
-1.  **Generate Synthetic Data (Reverse Engineering)**:
-
-```bash
-python -m src.data.generate_synthetic --limit <N>  # Limit to N samples per dataset
-```
-
-This will generate `data/synthetic_rubrics.jsonl`.
-
-2.  **SFT Training**:
+Generate all training data (synthetic rubrics + SFT mix + RL parquet) in one command:
 
 ```bash
-python -m src.training.sft_trainer
+./run_data_preprocessing.sh --limit 100   # 100 samples per dataset
+./run_data_preprocessing.sh --skip-synthetic  # reuse existing synthetic_rubrics.jsonl
 ```
 
-This will fine-tune the GRM on the synthetic rubrics.
+This produces:
+- `data/synthetic_rubrics.jsonl` — raw Oracle-generated rubrics
+- `data/sft_train.jsonl` — weighted SFT mix (HealthBench + synthetic)
+- `data/rl_train.parquet` — verl-compatible RL training data
+
+### Phase 1: SFT (Cold Start)
+
+```bash
+./run_sft.sh
+```
+
+Fine-tunes the GRM on the weighted SFT mix with pre/post benchmarking.
 
 ### Phase 2: Reinforcement Learning
 
-1.  **Run RL Training**:
-
 ```bash
-./run_training.sh --limit 999999999
+./run_rl.sh
 ```
 
-This will start the RL loop using the vendored `verl` under `./verl`.
+Runs the DAPO RL loop using the vendored `verl` under `./verl`.
 
 ## Benchmark
 

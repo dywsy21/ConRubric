@@ -1,6 +1,7 @@
 import os
 import json
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 
 # Load environment variables before importing other libraries
@@ -10,6 +11,10 @@ from datasets import load_dataset
 from tqdm import tqdm
 from src.evaluation.judge import Oracle
 from src.config import DataConfig, ProjectConfig
+
+# Parallel workers for Oracle API calls during synthetic generation
+DEFAULT_ORACLE_WORKERS = int(os.environ.get("GRM_ORACLE_WORKERS", 8))
+
 
 def extract_qa(sample, dataset_name):
     question = ""
@@ -25,12 +30,9 @@ def extract_qa(sample, dataset_name):
     elif "open-instruct" in dataset_name:
         question = sample.get('instruction', "")
         gold_answer = sample.get('output', "")
-        if not question: # Try 'input' if instruction is empty or combined
+        if not question:
              question = sample.get('input', "")
     elif "roleplay" in dataset_name:
-        # Simplified handling for roleplay, might need adjustment based on actual columns
-        # Assuming 'text' field or similar, but let's skip if structure is complex for now
-        # Or try to find 'instruction' / 'response' if mapped
         pass
     elif "OpenMathInstruct" in dataset_name:
         question = sample.get('question', "")
@@ -43,7 +45,24 @@ def extract_qa(sample, dataset_name):
         
     return question, gold_answer
 
-def generate_synthetic_data(limit: int = None):
+
+def _process_one(oracle: Oracle, question: str, gold_answer: str, dataset_name: str):
+    """Reverse-engineer a rubric for a single (Q, A) pair. Thread-safe."""
+    rubric = oracle.reverse_engineer_rubric(question, gold_answer)
+    if rubric:
+        return {
+            "source": dataset_name,
+            "question": question,
+            "gold_answer": gold_answer,
+            "rubric": rubric,
+        }
+    return None
+
+
+def generate_synthetic_data(limit: int = None, max_workers: int = None):
+    if max_workers is None:
+        max_workers = DEFAULT_ORACLE_WORKERS
+
     config = DataConfig()
     project_config = ProjectConfig()
     
@@ -83,37 +102,46 @@ def generate_synthetic_data(limit: int = None):
                 continue
                 
             needed = current_limit - already_processed
-            print(f"Processing dataset: {dataset_name}. Need {needed} more samples.")
+            print(f"Processing dataset: {dataset_name}. Need {needed} more samples. (workers={max_workers})")
 
             try:
-                # Load a subset to save time/memory if needed, or stream
                 ds = load_dataset(dataset_name, split="train", streaming=True)
                 
-                count = 0
-                for sample in tqdm(ds):
-                    if count >= needed:
+                # Collect candidate (question, gold_answer) pairs from the stream
+                candidates = []
+                for sample in ds:
+                    if len(candidates) >= needed:
                         break
-                        
                     question, gold_answer = extract_qa(sample, dataset_name)
-                    
-                    if not question or not gold_answer:
-                        continue
-                        
-                    # Reverse engineer rubric with signed points (-10~10)
-                    rubric = oracle.reverse_engineer_rubric(question, gold_answer)
-                    
-                    if rubric:
-                        record = {
-                            "source": dataset_name,
-                            "question": question,
-                            "gold_answer": gold_answer,
-                            "rubric": rubric
-                        }
-                        f.write(json.dumps(record) + "\n")
-                        f.flush()
-                        count += 1
-                        total_samples += 1
-                        
+                    if question and gold_answer:
+                        candidates.append((question, gold_answer))
+
+                if not candidates:
+                    print(f"  No valid Q/A pairs found in {dataset_name}, skipping.")
+                    continue
+
+                # Process candidates in parallel using Oracle workers
+                count = 0
+                pbar = tqdm(total=needed, desc=f"  {dataset_name.split('/')[-1]}")
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {
+                        executor.submit(_process_one, oracle, q, a, dataset_name): (q, a)
+                        for q, a in candidates
+                    }
+                    for future in as_completed(futures):
+                        try:
+                            record = future.result()
+                            if record is not None:
+                                f.write(json.dumps(record) + "\n")
+                                f.flush()
+                                count += 1
+                                total_samples += 1
+                                pbar.update(1)
+                        except Exception as e:
+                            print(f"  Worker error: {e}")
+                pbar.close()
+                print(f"  {dataset_name}: wrote {count} samples")
+
             except Exception as e:
                 print(f"Error processing dataset {dataset_name}: {e}")
 

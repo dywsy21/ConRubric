@@ -11,16 +11,18 @@ from tqdm import tqdm
 from openai import OpenAI
 import httpx
 
+from src.utils.prompts import SOLVER_PROMPT
+
 # Suppress verbose HTTP logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Default parallel settings
-DEFAULT_MAX_WORKERS = int(os.environ.get("GRM_SOLVER_WORKERS", 8))
+DEFAULT_MAX_WORKERS = int(os.environ.get("GRM_SOLVER_WORKERS", 4))
 
 # Global cache directory
-CACHE_DIR = Path(os.environ.get("GRM_CACHE_DIR", "./cache/api_responses"))
+CACHE_DIR = Path(os.environ.get("GRM_CACHE_DIR", "./out/cache"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 def _get_cache_key(model: str, question: str, rubric: str = "") -> str:
@@ -141,16 +143,7 @@ class Solver:
             return cached_response
         
         # Construct prompt
-        prompt = f"""You are a helpful assistant. Please answer the following question.
-        
-Question:
-{question}
-
-Please ensure your answer follows these principles:
-{rubric}
-
-Answer:
-"""
+        prompt = SOLVER_PROMPT.format(question=question, rubric=rubric)
         if self.is_remote:
             answer = self._call_with_retry(prompt)
             if answer:

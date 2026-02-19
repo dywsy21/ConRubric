@@ -58,8 +58,8 @@ def main():
     parser.add_argument("--num_samples", type=int, default=120)
     parser.add_argument("--benchmark_ratio", type=float, default=0.2)
     parser.add_argument("--split_seed", type=int, default=42)
-    parser.add_argument("--output_md", type=str, default="results/sft_eval/rubric_comparison.md")
-    parser.add_argument("--output_jsonl", type=str, default="results/sft_eval/rubric_comparison.jsonl")
+    parser.add_argument("--output_md", type=str, default="out/bench/sft/rubric_comparison.md")
+    parser.add_argument("--output_jsonl", type=str, default="out/bench/sft/rubric_comparison.jsonl")
     args = parser.parse_args()
 
     if args.num_samples <= 100:

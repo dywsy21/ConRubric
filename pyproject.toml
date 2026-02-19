@@ -20,7 +20,8 @@ dependencies = [
     "python-dotenv",
     "huggingface_hub",
     "flash-attn",
-    "trl"
+    "trl",
+    "uvloop"
 ]
 
 [build-system]

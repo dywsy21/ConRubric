@@ -568,11 +568,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             actor_optimizer = build_optimizer(actor_module_fsdp.parameters(), optim_config)
 
-            total_steps = optim_config.get("total_training_steps", 0)
+            total_steps = int(optim_config.get("total_training_steps", 0))
             num_warmup_steps = int(optim_config.get("lr_warmup_steps", -1))
             lr_scheduler_type = optim_config.get("lr_scheduler_type", "constant")
-            min_lr_ratio = optim_config.get("min_lr_ratio", 0.0)
-            num_cycles = optim_config.get("num_cycles", 0.5)
+            min_lr_ratio = float(optim_config.get("min_lr_ratio", 0.0))
+            num_cycles = float(optim_config.get("num_cycles", 0.5))
             if num_warmup_steps < 0:
                 num_warmup_steps_ratio = optim_config.get("lr_warmup_steps_ratio", 0.0)
                 num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
@@ -1475,7 +1475,7 @@ class CriticWorker(Worker, DistProfilerExtension):
 
         critic_optimizer = build_optimizer(critic_module.parameters(), config.optim)
 
-        total_steps = config.optim.get("total_training_steps", 0)
+        total_steps = int(config.optim.get("total_training_steps", 0))
         num_warmup_steps = int(config.optim.get("lr_warmup_steps", -1))
 
         lr_scheduler_type = config.optim.get("lr_scheduler_type", "constant")

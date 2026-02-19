@@ -17,11 +17,11 @@ logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Default parallel settings
-DEFAULT_MAX_WORKERS = int(os.environ.get("GRM_ORACLE_WORKERS", 8))
-from src.utils.prompts import REVERSE_ENGINEER_RUBRIC_PROMPT, ANCHOR_EVALUATION_PROMPT, DYNAMIC_RUBRIC_EVALUATION_PROMPT
+DEFAULT_MAX_WORKERS = int(os.environ.get("GRM_ORACLE_WORKERS", 4))
+from src.utils.prompts import REVERSE_ENGINEER_RUBRIC_PROMPT, DYNAMIC_RUBRIC_EVALUATION_PROMPT
 
 # Global cache directory
-CACHE_DIR = Path(os.environ.get("GRM_CACHE_DIR", "./cache/api_responses"))
+CACHE_DIR = Path(os.environ.get("GRM_CACHE_DIR", "./out/cache"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 def _get_cache_key(model: str, prompt: str) -> str:
@@ -160,12 +160,17 @@ class Judge:
             return []
 
         try:
+            # Strip <think>...</think> blocks (Qwen3-style chain-of-thought)
+            cleaned = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
+            # Strip markdown fences
+            cleaned = re.sub(r"```(?:json)?\s*", "", cleaned).strip()
+
             # Attempt JSON array extraction
-            start = response_text.find('[')
-            end = response_text.rfind(']') + 1
+            start = cleaned.find('[')
+            end = cleaned.rfind(']') + 1
             parsed = None
             if start != -1 and end > start:
-                json_str = response_text[start:end]
+                json_str = cleaned[start:end]
                 parsed = json.loads(json_str)
             else:
                 parsed = None
@@ -198,7 +203,7 @@ class Judge:
                 return out
 
             # Text fallback: parse lines like "- [+3] ..." / "- [-4] ..."
-            lines = response_text.split('\n')
+            lines = cleaned.split('\n')
             for line in lines:
                 line_strip = line.strip()
                 if not line_strip:
@@ -228,7 +233,7 @@ class Judge:
         if rubric:
             prompt = DYNAMIC_RUBRIC_EVALUATION_PROMPT.format(question=question, answer=answer, rubric=rubric)
         else:
-            prompt = ANCHOR_EVALUATION_PROMPT.format(question=question, answer=answer)
+            raise NotImplementedError("Current implementation requires a rubric for evaluation. Please provide a rubric.")
         
         cache_key = _get_cache_key(self.model_name, prompt)
         

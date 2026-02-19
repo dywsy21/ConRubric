@@ -10,6 +10,8 @@ from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.utils.model import compute_position_id_with_mask
 
+from src.utils.prompts import RUBRIC_GENERATION_PROMPT
+
 
 class WeightedRubricSFTDataset(Dataset):
     """
@@ -41,12 +43,7 @@ class WeightedRubricSFTDataset(Dataset):
         self.apply_chat_template_kwargs = config.get("apply_chat_template_kwargs", {})
         self.sft_instruction_template = config.get(
             "sft_instruction_template",
-            (
-                "Please generate a comprehensive evaluation rubric for the following user question. "
-                "Output each criterion on a new line with signed points in the format: "
-                "- [+/-points] criterion | tags: ...\n\n"
-                "Question:\n{question}"
-            ),
+            RUBRIC_GENERATION_PROMPT,
         )
 
         # weighting knobs

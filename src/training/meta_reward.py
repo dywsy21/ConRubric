@@ -1,15 +1,17 @@
 import os
+import threading
 import torch
 import numpy as np
 from typing import List, Dict, Tuple
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, Future, as_completed
 from tqdm import tqdm
 from src.evaluation.judge import Oracle
 from src.models.solver import Solver
 
-# Default parallel settings
-DEFAULT_MAX_WORKERS = int(os.environ.get("GRM_REWARD_WORKERS", 8))
+# Per-service parallel settings
+DEFAULT_SOLVER_WORKERS = int(os.environ.get("GRM_SOLVER_WORKERS", 4))
+DEFAULT_ORACLE_WORKERS = int(os.environ.get("GRM_ORACLE_WORKERS", 4))
 
 class MetaRewardFunction:
     def __init__(self, solver_model_name: str, oracle_model_name: str, 
@@ -57,103 +59,201 @@ class MetaRewardFunction:
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+
+    @classmethod
+    def from_env(cls) -> "MetaRewardFunction":
+        from src.config import ProjectConfig
+
+        cfg = ProjectConfig()
+        return cls(
+            solver_model_name=cfg.solver_model_name,
+            oracle_model_name=cfg.oracle_model_name,
+            oracle_api_key=cfg.oracle_api_key,
+            oracle_api_base=cfg.oracle_api_base,
+            solver_remote=cfg.solver_remote,
+            solver_api_key=cfg.solver_api_key,
+            solver_api_base=cfg.solver_api_base,
+        )
         
-    def compute_reward(self, questions: List[str], rubrics: List[str], 
-                       max_workers: int = None) -> torch.Tensor:
+    def compute_reward(self, questions: List[str], rubrics: List[str],
+                       solver_workers: int = None,
+                       oracle_workers: int = None) -> torch.Tensor:
         """
-        Computes the Consensus-Based Meta-Reward with parallel execution.
-        
-        Logic:
-        1. Group inputs by Question.
-        2. For each Question, we have N rubrics.
-        3. Generate N answers (one per rubric) - PARALLEL
-        4. Cross-Evaluate: Evaluate answer A_i against Rubric R_j (for all j != i) - PARALLEL
-        5. Reward R_i = Mean(Score(A_i, R_j))
+        Computes the Consensus-Based Meta-Reward with pipelined execution.
+
+        All questions are processed concurrently: while remote Solver/Oracle
+        calls are in-flight for question i, work for question i+1 is already
+        being submitted.  Two shared thread-pools (solver_pool, oracle_pool)
+        enforce per-service concurrency limits.
+
+        Pipeline per question:
+            1. Generate N answers via Solver (parallel within solver_pool)
+            2. As soon as ALL answers for a question arrive, submit N*(N-1)
+               cross-evaluation tasks to the oracle_pool.
+            3. When all evals finish, compute per-rubric reward.
+
+        Every rollout gets its own reward for proper RL policy gradients.
         """
-        if max_workers is None:
-            max_workers = DEFAULT_MAX_WORKERS
-        
-        print(f"[MetaReward] Computing rewards for {len(questions)} samples, max_workers={max_workers}")
-        
-        # Group by question to handle the N samples per prompt
-        # Map question -> list of (index, rubric)
-        q_to_rubrics = defaultdict(list)
+        if solver_workers is None:
+            solver_workers = DEFAULT_SOLVER_WORKERS
+        if oracle_workers is None:
+            oracle_workers = DEFAULT_ORACLE_WORKERS
+
+        print(f"[MetaReward] Computing rewards for {len(questions)} samples, "
+              f"solver_workers={solver_workers}, oracle_workers={oracle_workers}")
+
+        # ── Group by question ──────────────────────────────────────────
+        q_to_rubrics: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
         for idx, (q, r) in enumerate(zip(questions, rubrics)):
             q_to_rubrics[q].append((idx, r))
-            
-        rewards = torch.zeros(len(questions), dtype=torch.float32)
-        
-        # Progress bar for questions
-        q_items = list(q_to_rubrics.items())
-        print(f"[MetaReward] Processing {len(q_items)} unique questions")
-        
-        for q_idx, (q, items) in enumerate(q_items):
-            print(f"[MetaReward] Question {q_idx+1}/{len(q_items)}: {len(items)} rubrics")
-            indices = [item[0] for item in items]
-            current_rubrics = [item[1] for item in items]
-            n = len(current_rubrics)
-            
-            if n < 2:
-                # Fallback if only 1 rubric per question (can't do cross-eval properly)
-                print(f"Warning: Only {n} rubric(s) for question '{q[:20]}...'. Skipping cross-eval.")
-                for idx, r in zip(indices, current_rubrics):
-                    ans = self.solver.generate_answer(q, r)
-                    score = self.oracle.evaluate_answer(q, ans) 
-                    rewards[idx] = score
-                continue
 
-            # 1. Generate Answers in PARALLEL
-            # answers[i] corresponds to rubric[i]
-            print(f"[MetaReward]   Generating {n} answers...")
-            answers = self.solver.generate_batch([q]*n, current_rubrics, 
-                                                  show_progress=False, 
-                                                  max_workers=max_workers)
-            print(f"[MetaReward]   Generated {len(answers)} answers")
-            
-            # 2. Cross-Evaluation Matrix - PARALLEL
-            # Build list of all (i, j) pairs to evaluate (excluding diagonal)
-            eval_tasks = []
+        q_items = list(q_to_rubrics.items())
+        print(f"[MetaReward] Processing {len(q_items)} unique questions (pipelined)")
+
+        rewards = torch.zeros(len(questions), dtype=torch.float32)
+
+        # Shared thread-pools – one for each remote service.
+        solver_pool = ThreadPoolExecutor(max_workers=max(1, solver_workers))
+        oracle_pool = ThreadPoolExecutor(max_workers=max(1, oracle_workers))
+
+        # Track progress with a simple counter protected by a lock.
+        progress_lock = threading.Lock()
+        progress = {"solver_done": 0, "solver_total": 0,
+                     "eval_done": 0, "eval_total": 0,
+                     "q_done": 0, "q_total": len(q_items)}
+
+        def _log_progress(kind: str):
+            with progress_lock:
+                progress[f"{kind}_done"] += 1
+                sd, st = progress["solver_done"], progress["solver_total"]
+                ed, et = progress["eval_done"], progress["eval_total"]
+                qd, qt = progress["q_done"], progress["q_total"]
+            # Log every 4 events or on completion
+            total_done = sd + ed
+            if total_done % 4 == 0 or (sd == st and ed == et):
+                print(f"[MetaReward]   solver={sd}/{st}  eval={ed}/{et}  questions={qd}/{qt}")
+
+        # ── Helper: generate one answer ────────────────────────────────
+        def _gen_answer(q: str, rubric: str) -> str:
+            ans = self.solver.generate_answer(q, rubric)
+            _log_progress("solver")
+            return ans
+
+        # ── Helper: evaluate one (answer, rubric) pair ─────────────────
+        def _eval_pair(q: str, answer: str, rubric: str) -> float:
+            score = self.oracle.evaluate_answer(q, answer, rubric=rubric)
+            _log_progress("eval")
+            return score
+
+        # ── Phase 1: Submit ALL solver tasks across ALL questions ──────
+        # solver_futures[q_idx] = list of (rubric_local_idx, Future[str])
+        solver_futures: Dict[int, List[Tuple[int, Future]]] = {}
+
+        for q_idx, (q, items) in enumerate(q_items):
+            n = len(items)
+            with progress_lock:
+                progress["solver_total"] += n
+
+            if n < 2:
+                # Degenerate case – still submit to solver_pool for uniformity
+                idx0, r0 = items[0]
+                fut = solver_pool.submit(_gen_answer, q, r0)
+                solver_futures[q_idx] = [(0, fut)]
+            else:
+                futs = []
+                for local_i, (_, rubric) in enumerate(items):
+                    fut = solver_pool.submit(_gen_answer, q, rubric)
+                    futs.append((local_i, fut))
+                solver_futures[q_idx] = futs
+
+        # ── Phase 2: For each question, wait for its answers then
+        #    immediately submit cross-eval tasks.  A coordinator thread
+        #    per question handles this so questions overlap. ─────────────
+        # eval_futures[q_idx] = list of (i, j, Future[float])
+        eval_futures: Dict[int, List[Tuple[int, int, Future]]] = {}
+        coordinator_futures: List[Future] = []
+        coordinator_pool = ThreadPoolExecutor(max_workers=len(q_items))
+
+        def _coordinate_question(q_idx: int, q: str, items: List[Tuple[int, str]], n: int):
+            """Wait for this question's solver results, then submit oracle evals."""
+            # Collect answers in order
+            answers = [""] * n
+            for local_i, fut in solver_futures[q_idx]:
+                try:
+                    answers[local_i] = fut.result(timeout=900)  # 15 min max
+                except Exception as e:
+                    print(f"[MetaReward] Solver error Q{q_idx} rubric {local_i}: {e}")
+
+            if n < 2:
+                # Single rubric – direct eval, no cross-eval
+                idx0 = items[0][0]
+                fut = oracle_pool.submit(_eval_pair, q, answers[0], items[0][1])
+                with progress_lock:
+                    progress["eval_total"] += 1
+                eval_futures[q_idx] = [(0, -1, fut)]
+                return
+
+            # Submit all cross-eval pairs to oracle_pool
+            pairs = []
             for i in range(n):
                 for j in range(n):
                     if i != j:
-                        eval_tasks.append((i, j, q, answers[i], current_rubrics[j]))
-            
-            score_matrix = np.zeros((n, n))
-            
-            def evaluate_single(args: Tuple[int, int, str, str, str]) -> Tuple[int, int, float]:
-                i, j, question, answer, rubric = args
-                score = self.oracle.evaluate_answer(question, answer, rubric=rubric)
-                return i, j, score
-            
-            # Execute evaluations in parallel (or sequentially if max_workers=1)
-            print(f"[MetaReward]   Cross-evaluating {len(eval_tasks)} pairs...")
-            completed = 0
-            with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
-                futures = {executor.submit(evaluate_single, task): task[:2] for task in eval_tasks}
-                
-                for future in as_completed(futures):
+                        rubric_j = items[j][1]
+                        fut = oracle_pool.submit(_eval_pair, q, answers[i], rubric_j)
+                        pairs.append((i, j, fut))
+            with progress_lock:
+                progress["eval_total"] += len(pairs)
+            eval_futures[q_idx] = pairs
+
+        for q_idx, (q, items) in enumerate(q_items):
+            n = len(items)
+            cfut = coordinator_pool.submit(_coordinate_question, q_idx, q, items, n)
+            coordinator_futures.append(cfut)
+
+        # ── Phase 3: Wait for all coordinators (i.e. all oracle tasks
+        #    have been submitted), then collect results. ─────────────────
+        for cfut in coordinator_futures:
+            cfut.result()  # raises on error
+
+        # Now all oracle futures are in eval_futures. Collect them.
+        for q_idx, (q, items) in enumerate(q_items):
+            indices = [it[0] for it in items]
+            n = len(items)
+
+            if n < 2:
+                # Single rubric
+                for i, j, fut in eval_futures[q_idx]:
                     try:
-                        i, j, score = future.result(timeout=600)  # 10 min timeout per eval
-                        score_matrix[i][j] = score
-                        completed += 1
-                        if completed % 4 == 0 or completed == len(eval_tasks):
-                            print(f"[MetaReward]     Completed {completed}/{len(eval_tasks)} evals")
+                        score = fut.result(timeout=900)
                     except Exception as e:
-                        print(f"[MetaReward]     Error in eval: {e}")
-                        i_idx, j_idx = futures[future]
-                        score_matrix[i_idx][j_idx] = 0.0
-            
-            # 3. Compute Rewards
-            # Reward for Rubric i is the average score of Answer i against all other Rubrics j!=i
-            for i in range(n):
-                avg_score = score_matrix[i].sum() / (n - 1)
-                rewards[indices[i]] = avg_score
-            
-            print(f"[MetaReward]   Question {q_idx+1} done, avg rewards: {[rewards[idx].item() for idx in indices]}")
-                
+                        print(f"[MetaReward] Eval error Q{q_idx}: {e}")
+                        score = 0.0
+                    rewards[indices[0]] = score
+            else:
+                score_matrix = np.zeros((n, n))
+                for i, j, fut in eval_futures[q_idx]:
+                    try:
+                        score_matrix[i][j] = fut.result(timeout=900)
+                    except Exception as e:
+                        print(f"[MetaReward] Eval error Q{q_idx} ({i},{j}): {e}")
+
+                for i in range(n):
+                    avg_score = score_matrix[i].sum() / (n - 1)
+                    rewards[indices[i]] = avg_score
+
+            with progress_lock:
+                progress["q_done"] += 1
+
+            print(f"[MetaReward]   Q{q_idx+1}/{len(q_items)} done, "
+                  f"rewards={[rewards[idx].item() for idx in indices]}")
+
+        # ── Cleanup ────────────────────────────────────────────────────
+        solver_pool.shutdown(wait=False)
+        oracle_pool.shutdown(wait=False)
+        coordinator_pool.shutdown(wait=False)
+
         print(f"[MetaReward] All rewards computed, mean={rewards.mean():.3f}")
         return rewards
 
     def _generate_answer(self, question: str, rubric: str) -> str:
         return self.solver.generate_answer(question, rubric) 
-
