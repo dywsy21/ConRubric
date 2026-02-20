@@ -230,10 +230,11 @@ class Judge:
         Evaluates an answer and returns a scalar score (0-10).
         Retries on parsing errors.
         """
-        if rubric:
-            prompt = DYNAMIC_RUBRIC_EVALUATION_PROMPT.format(question=question, answer=answer, rubric=rubric)
-        else:
-            raise NotImplementedError("Current implementation requires a rubric for evaluation. Please provide a rubric.")
+        if not rubric or not rubric.strip():
+            print("Warning: empty rubric passed to evaluate_answer, returning 0.0")
+            return 0.0
+
+        prompt = DYNAMIC_RUBRIC_EVALUATION_PROMPT.format(question=question, answer=answer, rubric=rubric)
         
         cache_key = _get_cache_key(self.model_name, prompt)
         

@@ -1,3 +1,4 @@
+import re
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from typing import List, Optional
@@ -28,30 +29,30 @@ class RubricGenerator:
         prompt = RUBRIC_GENERATION_PROMPT.format(question=question)
 
         # Wrap in chat template so the model treats it as an instruction.
-        # Disable thinking mode (Qwen3) to get direct rubric output.
+        # Use default template (matches SFT training in weighted_sft_dataset.py).
         messages = [{"role": "user", "content": prompt}]
-        chat_kwargs = {"add_generation_prompt": True, "return_tensors": "pt"}
-        try:
-            # Qwen3 supports enable_thinking; other models will ignore / raise
-            input_ids = self.tokenizer.apply_chat_template(
-                messages, enable_thinking=False, **chat_kwargs
-            ).to(self.device)
-        except TypeError:
-            input_ids = self.tokenizer.apply_chat_template(
-                messages, **chat_kwargs
-            ).to(self.device)
+        input_ids = self.tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, return_tensors="pt"
+        ).to(self.device)
+        attention_mask = torch.ones_like(input_ids)
 
         with torch.no_grad():
             outputs = self.model.generate(
                 input_ids,
+                attention_mask=attention_mask,
                 max_new_tokens=512,
                 temperature=0.7,
                 do_sample=True,
             )
 
-        # Decode only the newly generated tokens
+        # Decode only the newly generated tokens, stripping any <think>…</think> block
         generated_ids = outputs[0][input_ids.shape[-1]:]
-        return self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+        text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+        text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL)
+        result = text.strip()
+        if not result:
+            print(f"Warning: generate_rubric produced empty output for question: {question[:80]}...")
+        return result
 
     def generate_batch(self, questions: List[str]) -> List[str]:
         return [self.generate_rubric(q) for q in questions]

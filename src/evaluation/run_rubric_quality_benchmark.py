@@ -5,6 +5,8 @@ import os
 from collections import defaultdict
 from typing import Dict, List, Tuple
 
+from scipy.stats import spearmanr
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -60,27 +62,64 @@ def _pairwise_metrics(scores: List[float], labels: List[float]) -> Tuple[float, 
     return correct / total, gap_sum / total, float(total)
 
 
-def _excellent_good_gap(pred_scores: List[float], label_scores: List[float]) -> Dict[str, float]:
-    excellent = [s for s, y in zip(pred_scores, label_scores) if y >= 0.85]
-    good = [s for s, y in zip(pred_scores, label_scores) if 0.60 <= y < 0.85]
-    poor = [s for s, y in zip(pred_scores, label_scores) if y < 0.60]
+def _discrimination_metrics(
+    per_prompt_data: List[Tuple[List[float], List[float]]],
+) -> Dict[str, float]:
+    """Rubric discrimination quality: does the rubric make the Judge rank
+    completions in agreement with ground-truth labels?
 
-    def _mean(xs):
+    Returns three complementary metrics, all computed *within* each prompt
+    (so cross-rubric scale differences cancel out) then averaged:
+
+    1. **avg_spearman**: Mean Spearman rank-correlation between predicted
+       scores and label scores across prompts.  Ranges [-1, 1]; higher is
+       better.  Only computed for prompts with ≥ 2 distinct label values
+       (otherwise ranking is undefined).
+
+    2. **avg_top_bottom_gap**: For each prompt, computes
+       ``mean(pred | label == best) − mean(pred | label == worst)``.
+       Positive means the rubric correctly pushes up better completions.
+       Only requires that the prompt has at least two different label
+       values (always the case in practice), so it never suffers from
+       empty-bucket problems.
+
+    3. **avg_score_label_corr**: Pearson-like dot-product correlation
+       (via Spearman) for sanity-checking.
+    """
+    spearman_vals: List[float] = []
+    top_bottom_gaps: List[float] = []
+
+    for preds, labels in per_prompt_data:
+        if len(preds) < 2:
+            continue
+
+        unique_labels = set(labels)
+        if len(unique_labels) < 2:
+            # All completions share the same label → ranking is undefined.
+            continue
+
+        # --- Spearman ---
+        rho, _ = spearmanr(preds, labels)
+        if not math.isnan(rho):
+            spearman_vals.append(rho)
+
+        # --- Top-bottom gap ---
+        best_label = max(unique_labels)
+        worst_label = min(unique_labels)
+        top_preds = [s for s, y in zip(preds, labels) if y == best_label]
+        bot_preds = [s for s, y in zip(preds, labels) if y == worst_label]
+        if top_preds and bot_preds:
+            gap = (sum(top_preds) / len(top_preds)) - (sum(bot_preds) / len(bot_preds))
+            top_bottom_gaps.append(gap)
+
+    def _mean(xs: List[float]) -> float:
         return sum(xs) / len(xs) if xs else float("nan")
 
-    ex_m = _mean(excellent)
-    gd_m = _mean(good)
-    pr_m = _mean(poor)
-
     return {
-        "excellent_mean": ex_m,
-        "good_mean": gd_m,
-        "poor_mean": pr_m,
-        "excellent_minus_good": ex_m - gd_m if not (math.isnan(ex_m) or math.isnan(gd_m)) else float("nan"),
-        "good_minus_poor": gd_m - pr_m if not (math.isnan(gd_m) or math.isnan(pr_m)) else float("nan"),
-        "n_excellent": len(excellent),
-        "n_good": len(good),
-        "n_poor": len(poor),
+        "avg_spearman": _mean(spearman_vals),
+        "avg_top_bottom_gap": _mean(top_bottom_gaps),
+        "n_prompts_spearman": len(spearman_vals),
+        "n_prompts_top_bottom": len(top_bottom_gaps),
     }
 
 
@@ -126,8 +165,7 @@ def run_healthbench_rubric_quality(
     print(f"Benchmark prompts: {len(prompt_items)} (meta_eval rows: {sum(len(v) for _, v in prompt_items)})")
 
     per_prompt_results = []
-    all_pred_scores = []
-    all_label_scores = []
+    per_prompt_pred_labels: List[Tuple[List[float], List[float]]] = []
 
     for prompt_id, rows in tqdm(prompt_items, desc="HealthBench-RubricQuality"):
         prompt = rows[0]["prompt"]
@@ -161,7 +199,6 @@ def run_healthbench_rubric_quality(
             completions_batch.append(completion)
             rubrics_batch.append(rubric)
             label_scores.append(float(label))
-            all_label_scores.append(float(label))
 
         pred_scores = [
             float(x)
@@ -173,7 +210,7 @@ def run_healthbench_rubric_quality(
                 max_workers=eval_workers,
             )
         ]
-        all_pred_scores.extend(pred_scores)
+        per_prompt_pred_labels.append((pred_scores, label_scores))
 
         pair_acc, resolution, n_pairs = _pairwise_metrics(pred_scores, label_scores)
 
@@ -185,12 +222,14 @@ def run_healthbench_rubric_quality(
                 "pairwise_acc": pair_acc,
                 "resolution": resolution,
                 "pairs_used": n_pairs,
+                "pred_scores": pred_scores,
+                "label_scores": label_scores,
             }
         )
 
     avg_pair_acc = sum(x["pairwise_acc"] for x in per_prompt_results) / len(per_prompt_results) if per_prompt_results else 0.0
     avg_resolution = sum(x["resolution"] for x in per_prompt_results) / len(per_prompt_results) if per_prompt_results else 0.0
-    quality_gap = _excellent_good_gap(all_pred_scores, all_label_scores)
+    discrimination = _discrimination_metrics(per_prompt_pred_labels)
 
     summary = {
         "benchmark": "healthbench_rubric_quality",
@@ -198,7 +237,7 @@ def run_healthbench_rubric_quality(
         "num_prompts": len(per_prompt_results),
         "avg_pairwise_acc": avg_pair_acc,
         "avg_resolution": avg_resolution,
-        "excellent_good_gap": quality_gap,
+        "discrimination": discrimination,
         "split": {
             "benchmark_ratio": benchmark_ratio,
             "split_seed": split_seed,

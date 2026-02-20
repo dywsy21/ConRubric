@@ -37,12 +37,19 @@ def _load_metrics(bench_dir: Path) -> Dict[str, Dict[str, Any]]:
         data = json.loads(fpath.read_text())
         summary = data.get("summary", data)
         if name == "HB-RubricQuality":
-            gap = summary.get("excellent_good_gap", {})
+            disc = summary.get("discrimination", {})
+            # Also support legacy "excellent_good_gap" key for old result files
+            if not disc:
+                gap = summary.get("excellent_good_gap", {})
+                disc = {
+                    "avg_top_bottom_gap": gap.get("excellent_minus_poor"),
+                    "avg_spearman": None,
+                }
             out[name] = {
                 "pairwise_acc": summary.get("avg_pairwise_acc"),
                 "resolution": summary.get("avg_resolution"),
-                "ex−good_gap": gap.get("excellent_minus_good"),
-                "good−poor_gap": gap.get("good_minus_poor"),
+                "spearman": disc.get("avg_spearman"),
+                "top−bottom_gap": disc.get("avg_top_bottom_gap"),
             }
         else:
             out[name] = {"accuracy": summary.get("accuracy")}
