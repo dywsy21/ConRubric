@@ -30,12 +30,10 @@ from transformers import PreTrainedTokenizer
 
 from verl.utils.device import get_device_name, get_torch_device
 
-try:
-    from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
-
-    FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE = True
-except ImportError:
-    FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE = False
+# Disable flash-attn Triton cross_entropy: it produces NaN gradients
+# in bf16 with certain model architectures (e.g. Qwen3). Fall back to
+# standard PyTorch log_softmax + gather (logprobs_from_logits_v2).
+FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE = False
 
 
 try:

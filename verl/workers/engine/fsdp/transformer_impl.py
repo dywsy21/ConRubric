@@ -546,10 +546,35 @@ class FSDPEngine(BaseEngine):
         if isinstance(grad_norm, DTensor):
             grad_norm = grad_norm.full_tensor()
 
-        # if grad_norm is not finite, skip the update
+        # if grad_norm is not finite, diagnose and try a safe fallback
         if not torch.isfinite(grad_norm):
-            print(f"WARN: grad_norm is not finite: {grad_norm}")
-            self.optimizer.zero_grad()
+            nonfinite_params = []
+            finite_sq_sum = torch.zeros((), device=get_device_id(), dtype=torch.float64)
+            for name, p in self.module.named_parameters():
+                if p.grad is None:
+                    continue
+                g = p.grad
+                finite_mask = torch.isfinite(g)
+                if not torch.all(finite_mask):
+                    nonfinite_params.append(name)
+                else:
+                    finite_sq_sum += torch.sum((g.float()) ** 2, dtype=torch.float64)
+
+            if len(nonfinite_params) == 0:
+                fallback_norm = torch.sqrt(finite_sq_sum).float()
+                print(
+                    f"WARN: clip_grad_norm_ returned non-finite ({grad_norm}) but all grads are finite; "
+                    f"using fallback grad_norm={fallback_norm.item():.6f}"
+                )
+                self.optimizer.step()
+                grad_norm = fallback_norm
+            else:
+                preview = ", ".join(nonfinite_params[:5])
+                print(
+                    f"WARN: grad_norm is not finite: {grad_norm}. "
+                    f"non-finite grads in {len(nonfinite_params)} params (first: {preview})"
+                )
+                self.optimizer.zero_grad()
         else:
             self.optimizer.step()
         return grad_norm.item()

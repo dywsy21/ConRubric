@@ -105,7 +105,7 @@ def _load_synthetic_records(path: str, limit: Optional[int] = None) -> List[Dict
                 continue
             item = json.loads(line)
             question = (item.get("question") or "").strip()
-            rubrics = _normalize_rubrics(item.get("rubric", []))
+            rubrics = _normalize_rubrics(item.get("rubrics", item.get("rubric", [])))
             if not question or not rubrics:
                 continue
             records.append({"question": question, "rubrics": rubrics, "source": item.get("source", "synthetic")})
@@ -185,7 +185,8 @@ def _run_verl_sft(args, config: ProjectConfig, train_file: str):
         "sft_trainer_engine",
         f"model.path={config.grm_model_name}",
         "model.trust_remote_code=True",
-        "+model.override_config.attn_implementation=eager",
+        "+model.override_config.attn_implementation=sdpa",
+        "engine.model_dtype=bf16",
         f"data.train_files=['{train_file}']",
         "data.val_files=null",
         "data.custom_cls.path=pkg://src.training.weighted_sft_dataset",
@@ -210,11 +211,14 @@ def _run_verl_sft(args, config: ProjectConfig, train_file: str):
         f"trainer.test_freq={args.test_freq}",
         "trainer.logger=['console']",
         f"trainer.default_local_dir={args.output_dir}",
+        "engine.use_torch_compile=False",
     ]
 
     print("Launching verl SFT:")
     print(" ".join(cmd))
-    subprocess.run(cmd, check=True)
+    env = os.environ.copy()
+    env["HYDRA_FULL_ERROR"] = "1"
+    subprocess.run(cmd, check=True, env=env)
 
 
 def build_arg_parser():
