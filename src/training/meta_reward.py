@@ -139,11 +139,15 @@ class MetaRewardFunction:
             _log_progress("solver")
             return ans
 
-        # ── Helper: evaluate one (answer, rubric) pair ─────────────────
-        def _eval_pair(q: str, answer: str, rubric: str) -> float:
-            score = self.oracle.evaluate_answer(q, answer, rubric=rubric)
-            _log_progress("eval")
-            return score
+        # ── Helper: evaluate N answers against ONE rubric (batch) ──────
+        # The judge sees all answers side-by-side, producing *relative*
+        # scores calibrated against each other.
+        def _eval_batch_by_rubric(q: str, answers: List[str], rubric: str) -> List[float]:
+            """Returns N scores, one per answer, all relative to each other."""
+            scores = self.oracle.evaluate_answers_by_rubric(q, answers, rubric)
+            with progress_lock:
+                progress["eval_done"] += len(answers)
+            return scores
 
         # ── Phase 1: Submit ALL solver tasks across ALL questions ──────
         # solver_futures[q_idx] = list of (rubric_local_idx, Future[str])
@@ -175,7 +179,12 @@ class MetaRewardFunction:
         coordinator_pool = ThreadPoolExecutor(max_workers=len(q_items))
 
         def _coordinate_question(q_idx: int, q: str, items: List[Tuple[int, str]], n: int):
-            """Wait for this question's solver results, then submit oracle evals."""
+            """Wait for this question's solver results, then submit oracle evals.
+
+            Instead of N*(N-1) individual oracle calls, we make N batch calls:
+            for each rubric rⱼ, score ALL N answers in one LLM call.  This
+            gives the judge full context to produce relative scores.
+            """
             # Collect answers in order
             answers = [""] * n
             for local_i, fut in solver_futures[q_idx]:
@@ -186,24 +195,26 @@ class MetaRewardFunction:
 
             if n < 2:
                 # Single rubric – direct eval, no cross-eval
-                idx0 = items[0][0]
-                fut = oracle_pool.submit(_eval_pair, q, answers[0], items[0][1])
                 with progress_lock:
                     progress["eval_total"] += 1
-                eval_futures[q_idx] = [(0, -1, fut)]
+                fut = oracle_pool.submit(
+                    _eval_batch_by_rubric, q, [answers[0]], items[0][1]
+                )
+                eval_futures[q_idx] = [("single", fut)]
                 return
 
-            # Submit all cross-eval pairs to oracle_pool
-            pairs = []
-            for i in range(n):
-                for j in range(n):
-                    if i != j:
-                        rubric_j = items[j][1]
-                        fut = oracle_pool.submit(_eval_pair, q, answers[i], rubric_j)
-                        pairs.append((i, j, fut))
+            # For each rubric rⱼ, score ALL answers in one batch call.
+            # This produces N scores per call (N calls total instead of N*(N-1)).
+            batch_futs = []
             with progress_lock:
-                progress["eval_total"] += len(pairs)
-            eval_futures[q_idx] = pairs
+                progress["eval_total"] += n * n  # N answers × N rubrics
+            for j in range(n):
+                rubric_j = items[j][1]
+                fut = oracle_pool.submit(
+                    _eval_batch_by_rubric, q, answers, rubric_j
+                )
+                batch_futs.append((j, fut))
+            eval_futures[q_idx] = batch_futs
 
         for q_idx, (q, items) in enumerate(q_items):
             n = len(items)
@@ -222,23 +233,29 @@ class MetaRewardFunction:
 
             if n < 2:
                 # Single rubric
-                for i, j, fut in eval_futures[q_idx]:
-                    try:
-                        score = fut.result(timeout=900)
-                    except Exception as e:
-                        print(f"[MetaReward] Eval error Q{q_idx}: {e}")
-                        score = 0.0
-                    rewards[indices[0]] = score
+                tag, fut = eval_futures[q_idx][0]
+                try:
+                    scores = fut.result(timeout=900)
+                    rewards[indices[0]] = scores[0] if scores else 0.0
+                except Exception as e:
+                    print(f"[MetaReward] Eval error Q{q_idx}: {e}")
+                    rewards[indices[0]] = 0.0
             else:
+                # score_matrix[i][j] = score of answer_i under rubric_j
+                # Each batch call returns N scores for all answers under one rubric.
                 score_matrix = np.zeros((n, n))
-                for i, j, fut in eval_futures[q_idx]:
+                for j, fut in eval_futures[q_idx]:
                     try:
-                        score_matrix[i][j] = fut.result(timeout=900)
+                        scores = fut.result(timeout=900)  # List[float] of length N
+                        for i in range(n):
+                            score_matrix[i][j] = scores[i]
                     except Exception as e:
-                        print(f"[MetaReward] Eval error Q{q_idx} ({i},{j}): {e}")
+                        print(f"[MetaReward] Eval error Q{q_idx} rubric {j}: {e}")
 
+                # Reward for rubric_i = mean score of answer_i under all OTHER rubrics
                 for i in range(n):
-                    avg_score = score_matrix[i].sum() / (n - 1)
+                    off_diag = [score_matrix[i][j] for j in range(n) if j != i]
+                    avg_score = sum(off_diag) / len(off_diag) if off_diag else 0.0
                     rewards[indices[i]] = avg_score
 
             with progress_lock:

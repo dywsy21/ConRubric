@@ -76,14 +76,33 @@ Answer:
 Rubric:
 {rubric}
 
-Please evaluate how well the answer satisfies the criteria in the Rubric.
-Provide a score from 0 to 10, where 0 is complete failure and 10 is perfect adherence.
+Score from 0 to 10 (0 = complete failure, 10 = perfect adherence).
+Respond with ONLY the JSON object, no explanation.
 
-Output JSON:
-{{
-    "score": <score>,
-    "reasoning": "<brief explanation>"
-}}
+Output: {{"score": <integer>}}
+"""
+
+# ── Oracle: batch-evaluate multiple answers against ONE rubric ────────────
+# Used in RL meta-reward to get *relative* scores: seeing all answers at once
+# lets the judge calibrate scores against each other, making the ranking signal
+# much more meaningful than scoring each answer in isolation.
+BATCH_RUBRIC_EVALUATION_PROMPT = """
+You are an expert judge. You will evaluate {n} answers to the same question using the same rubric.
+Score each answer from 0 to 10 (0 = complete failure, 10 = perfect adherence).
+IMPORTANT: Compare the answers against each other to produce well-calibrated relative scores.
+
+Question:
+{question}
+
+Rubric:
+{rubric}
+
+{answers_block}
+
+Respond with ONLY a JSON array of {n} integers, one score per answer in order.
+Example for 3 answers: [8, 3, 6]
+
+Output:
 """
 
 

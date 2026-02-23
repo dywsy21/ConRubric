@@ -18,7 +18,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Default parallel settings
 DEFAULT_MAX_WORKERS = int(os.environ.get("GRM_ORACLE_WORKERS", 4))
-from src.utils.prompts import REVERSE_ENGINEER_RUBRIC_PROMPT, DYNAMIC_RUBRIC_EVALUATION_PROMPT
+from src.utils.prompts import REVERSE_ENGINEER_RUBRIC_PROMPT, DYNAMIC_RUBRIC_EVALUATION_PROMPT, BATCH_RUBRIC_EVALUATION_PROMPT
 
 # Global cache directory
 CACHE_DIR = Path(os.environ.get("GRM_CACHE_DIR", "./out/cache"))
@@ -324,7 +324,7 @@ Respond with only "YES" or "NO".
                        rubrics: List[Optional[str]] = None,
                        show_progress: bool = False, 
                        max_workers: int = None) -> List[float]:
-        """Evaluate multiple answers in parallel."""
+        """Evaluate multiple answers in parallel (each scored independently)."""
         if max_workers is None:
             max_workers = DEFAULT_MAX_WORKERS
         
@@ -341,14 +341,12 @@ Respond with only "YES" or "NO".
         tasks = list(zip(range(n), questions, answers, rubrics))
         
         if max_workers <= 1:
-            # Sequential execution
             iterator = tasks
             if show_progress:
                 iterator = tqdm(iterator, desc="  Evaluating", leave=False)
             for idx, q, a, r in iterator:
                 results[idx] = self.evaluate_answer(q, a, rubric=r)
         else:
-            # Parallel execution
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {executor.submit(evaluate_single, task): task[0] for task in tasks}
                 
@@ -365,6 +363,78 @@ Respond with only "YES" or "NO".
                     pbar.close()
         
         return results
+
+    def evaluate_answers_by_rubric(
+        self,
+        question: str,
+        answers: List[str],
+        rubric: str,
+        max_retries: int = 3,
+    ) -> List[float]:
+        """Score N answers against ONE rubric in a single LLM call.
+
+        The judge sees all answers side-by-side, producing *relative* scores
+        that are calibrated against each other.  This is used by the RL
+        meta-reward so that the cross-rubric scoring matrix carries genuine
+        ranking information.
+
+        Returns a list of N floats in [0, 10].
+        """
+        if not rubric or not rubric.strip():
+            print("Warning: empty rubric in evaluate_answers_by_rubric, returning zeros")
+            return [0.0] * len(answers)
+
+        n = len(answers)
+        if n == 0:
+            return []
+        if n == 1:
+            return [self.evaluate_answer(question, answers[0], rubric=rubric)]
+
+        answers_block = "\n\n".join(
+            f"--- Answer {i+1} ---\n{a}" for i, a in enumerate(answers)
+        )
+        prompt = BATCH_RUBRIC_EVALUATION_PROMPT.format(
+            n=n, question=question, rubric=rubric, answers_block=answers_block,
+        )
+
+        for attempt in range(max_retries):
+            response_text = self._call_api(prompt, temperature=0.0, use_cache=(attempt == 0))
+            scores = self._parse_batch_scores(response_text, n)
+            if scores is not None:
+                return scores
+            if attempt < max_retries - 1:
+                print(f"Retrying batch evaluation (attempt {attempt + 2}/{max_retries})...")
+
+        print(f"All batch-eval retries failed (n={n}), falling back to individual eval")
+        # Fallback: score each answer individually
+        return [self.evaluate_answer(question, a, rubric=rubric) for a in answers]
+
+    def _parse_batch_scores(self, response_text: str, expected_n: int) -> Optional[List[float]]:
+        """Parse a JSON array of N scores from batch evaluation response."""
+        if not response_text:
+            return None
+        try:
+            cleaned = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
+            cleaned = re.sub(r"```(?:json)?\s*", "", cleaned).strip()
+
+            start = cleaned.find('[')
+            end = cleaned.rfind(']') + 1
+            if start == -1 or end <= start:
+                return None
+
+            arr = json.loads(cleaned[start:end])
+            if not isinstance(arr, list) or len(arr) != expected_n:
+                print(f"Batch scores length mismatch: got {len(arr) if isinstance(arr, list) else 'non-list'}, expected {expected_n}")
+                return None
+
+            scores = []
+            for v in arr:
+                s = float(v)
+                scores.append(max(0.0, min(10.0, s)))
+            return scores
+        except Exception as e:
+            print(f"Error parsing batch scores: {e}")
+            return None
 
 # Alias for backward compatibility if needed, though we changed the class name
 Oracle = Judge
