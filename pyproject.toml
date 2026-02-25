@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     # ── Core ML ──
-    "torch==2.5.1",
+    "torch==2.6.0",
     "transformers>=4.46.0",
     "datasets>=2.14.0",
     "accelerate>=0.25.0",
@@ -31,7 +31,7 @@ dependencies = [
     "tensorboard",
 
     # ── verl extras: vllm ──
-    "vllm>=0.8.5,<=0.12.0",
+    "vllm>=0.8.5,<=0.8.5.post1",
 
     # ── verl extras: trl ──
     "trl<=0.9.6",
@@ -55,7 +55,7 @@ build-backend = "hatchling.build"
 packages = ["src", "verl"]
 
 [tool.uv.sources]
-flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.0.post2/flash_attn-2.7.0.post2+cu12torch2.5cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" }
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.2.post1/flash_attn-2.7.2.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" }
 
 [tool.uv.extra-build-dependencies]
 flash-attn = ["torch"]
