@@ -5,23 +5,46 @@ description = "Meta-Reward General Reward Model Training"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    # ── Core ML ──
     "torch==2.5.1",
-    "transformers>=4.36.0",
+    "transformers>=4.46.0",
     "datasets>=2.14.0",
     "accelerate>=0.25.0",
-    "vllm>=0.8.5,<=0.11.0",
-    "ray>=2.50.1",
-    "numpy",
+    "flash-attn",
+    "numpy<2.0.0",
+
+    # ── verl core deps (from volcengine/verl setup.py install_requires) ──
+    "codetiming",
+    "dill",
+    "hydra-core",
+    "omegaconf",
     "pandas",
-    "openai", # For Oracle/Judge API calls
-    "tyro", # For configuration management
-    "wandb", # For logging
+    "peft",
+    "pyarrow>=19.0.0",
+    "pybind11",
+    "pylatexenc",
+    "ray[default]>=2.41.0",
+    "torchdata",
+    "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
+    "wandb",
+    "packaging>=20.0",
+    "tensorboard",
+
+    # ── verl extras: vllm ──
+    "vllm>=0.8.5,<=0.12.0",
+
+    # ── verl extras: trl ──
+    "trl<=0.9.6",
+
+    # ── GRM-specific ──
+    "openai",
+    "tyro",
     "tqdm",
     "python-dotenv",
     "huggingface_hub",
-    "flash-attn",
-    "trl",
-    "uvloop"
+    "uvloop",
+    "scipy",
+    "httpx",
 ]
 
 [build-system]
