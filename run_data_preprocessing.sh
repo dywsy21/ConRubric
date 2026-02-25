@@ -28,11 +28,23 @@ fi
 
 source "$ROOT_DIR/.venv/bin/activate"
 
+# ── Apply proxy / CUDA from .env ──
+if [[ -n "${PROXY_URL:-}" ]]; then
+  export ALL_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" HTTP_PROXY="$PROXY_URL"
+  export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1}"
+  export no_proxy="${NO_PROXY:-localhost,127.0.0.1}"
+fi
+if [[ -n "${CUDA_HOME:-}" ]]; then
+  export PATH="$CUDA_HOME/bin:$PATH"
+fi
+
 PYTHON="${PYTHON_BIN:-python}"
 LIMIT="${LIMIT_PER_DATASET:-100}"
 SKIP_SYNTHETIC=0
 REBUILD_HB="${REBUILD_SPLIT:-0}"
 PREVIEW=2
+RUBRICHUB="${RUBRICHUB:-0}"
+RUBRICHUB_OUT="${RUBRICHUB_SFT_JSONL:-${ROOT_DIR}/data/rubrichub_sft.jsonl}"
 
 # ── parse args ────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -45,11 +57,17 @@ while [[ $# -gt 0 ]]; do
       REBUILD_HB=1; shift ;;
     --no-preview)
       PREVIEW=0; shift ;;
+    --rubrichub)
+      RUBRICHUB=1; shift ;;
+    --skip-rubrichub)
+      RUBRICHUB=0; shift ;;
     -h|--help)
-      echo "Usage: $0 [--limit N] [--skip-synthetic] [--rebuild-split] [--no-preview]"
+      echo "Usage: $0 [--limit N] [--skip-synthetic] [--rubrichub] [--rebuild-split] [--no-preview]"
       echo ""
       echo "  --limit N          Samples per dataset (default: LIMIT_PER_DATASET from .env, or 100)"
       echo "  --skip-synthetic   Skip Oracle rubric generation, reuse existing synthetic_rubrics.jsonl"
+      echo "  --rubrichub        Download & convert RubricHub data from HuggingFace"
+      echo "  --skip-rubrichub   Skip RubricHub download (default)"
       echo "  --rebuild-split    Force rebuild HealthBench SFT/benchmark split"
       echo "  --no-preview       Don't print sample previews"
       exit 0 ;;
@@ -66,8 +84,39 @@ echo "════════════════════════�
 echo " Data Preprocessing Pipeline"
 echo "  limit per dataset : $LIMIT"
 echo "  skip synthetic    : $SKIP_SYNTHETIC"
+echo "  rubrichub         : $RUBRICHUB"
 echo "  rebuild HB split  : $REBUILD_HB"
 echo "══════════════════════════════════════════════════════════"
+
+# ── Step 0 (optional): Download & convert RubricHub ──────────────────────
+if [[ "$RUBRICHUB" == "1" ]]; then
+  if [[ -f "$RUBRICHUB_OUT" ]]; then
+    echo ""
+    echo "[0/3] RubricHub already exists: $RUBRICHUB_OUT ($(wc -l < "$RUBRICHUB_OUT") rows)"
+    echo "      Delete it to force re-download."
+  else
+    echo ""
+    echo "[0/3] Downloading RubricHub from HuggingFace..."
+    mkdir -p "$(dirname "$RUBRICHUB_OUT")"
+    mkdir -p "${ROOT_DIR}/data/rubrichub_raw"
+    "$PYTHON" -c "
+from huggingface_hub import hf_hub_download, list_repo_tree
+repo = 'sojuL/RubricHub_v1'
+for subdir in ['sft_RuFT', 'RuRL']:
+    for entry in list_repo_tree(repo, path_in_repo=subdir, repo_type='dataset'):
+        if entry.path.endswith('.parquet'):
+            print(f'Downloading {entry.path} ({entry.size/1e6:.0f} MB)...')
+            hf_hub_download(repo, entry.path, repo_type='dataset',
+                            local_dir='${ROOT_DIR}/data/rubrichub_raw')
+print('Download complete')"
+    echo "[0/3] Converting RubricHub to SFT JSONL..."
+    "$PYTHON" -m src.data.prepare_rubrichub \
+        --input-dir "${ROOT_DIR}/data/rubrichub_raw/RuRL" \
+        --ruft-dir "${ROOT_DIR}/data/rubrichub_raw/sft_RuFT" \
+        --output "$RUBRICHUB_OUT"
+    echo "[0/3] Done → $RUBRICHUB_OUT ($(wc -l < "$RUBRICHUB_OUT") rows)"
+  fi
+fi
 
 # ── Step 1: Generate synthetic rubrics ────────────────────────────────────
 if [[ "$SKIP_SYNTHETIC" == "0" ]]; then
@@ -124,6 +173,9 @@ echo "[3/3] Done → $RL_OUT"
 echo ""
 echo "══════════════════════════════════════════════════════════"
 echo " All data ready!"
+if [[ "$RUBRICHUB" == "1" ]]; then
+  echo "  RubricHub : $RUBRICHUB_OUT"
+fi
 echo "  Synthetic : $SYNTHETIC_JSONL"
 echo "  SFT data  : $SFT_OUT"
 echo "  RL data   : $RL_OUT"

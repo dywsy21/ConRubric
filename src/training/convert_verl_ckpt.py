@@ -25,6 +25,77 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 
+def _to_plain(v: torch.Tensor) -> torch.Tensor:
+    """Extract plain torch.Tensor from a DTensor (or return as-is)."""
+    if type(v).__name__ == "DTensor" or hasattr(v, "_local_tensor"):
+        local = v._local_tensor if hasattr(v, "_local_tensor") else v
+        return local.detach().cpu().clone()
+    elif isinstance(v, torch.Tensor):
+        return v.detach().cpu()
+    return v
+
+
+def _load_and_merge_shards(step_dir: Path) -> dict:
+    """Load all FSDP rank shards and concatenate along dim 0.
+
+    verl FSDP2 saves per-parameter shards (DTensor with Shard(0) placement).
+    Each rank file has 1/world_size of every parameter along dimension 0.
+    We load all ranks and torch.cat them to reconstruct full parameters.
+    """
+    import re
+
+    # Find all rank files and determine world_size
+    all_pt = sorted(step_dir.glob("model_world_size_*_rank_*.pt"))
+    if not all_pt:
+        raise FileNotFoundError(f"No model_world_size_*_rank_*.pt in {step_dir}")
+
+    # Parse world_size and rank from filenames
+    pattern = re.compile(r"model_world_size_(\d+)_rank_(\d+)\.pt")
+    rank_files = {}
+    world_size = None
+    for f in all_pt:
+        m = pattern.match(f.name)
+        if not m:
+            continue
+        ws, rank = int(m.group(1)), int(m.group(2))
+        if world_size is None:
+            world_size = ws
+        rank_files[rank] = f
+
+    if world_size == 1:
+        # Single-rank checkpoint — no sharding, just load and de-tensor
+        print(f"[convert] Single-rank checkpoint, loading {rank_files[0].name} …")
+        sd = torch.load(rank_files[0], map_location="cpu", weights_only=False)
+        return {k: _to_plain(v) for k, v in sd.items()}
+
+    print(f"[convert] Found {len(rank_files)} shards (world_size={world_size})")
+    assert len(rank_files) == world_size, (
+        f"Expected {world_size} rank files, found {len(rank_files)}"
+    )
+
+    # Load all shards
+    shards = {}
+    for rank in range(world_size):
+        print(f"[convert]   Loading rank {rank} …")
+        sd = torch.load(rank_files[rank], map_location="cpu", weights_only=False)
+        shards[rank] = {k: _to_plain(v) for k, v in sd.items()}
+
+    # Merge: concatenate each parameter across ranks along dim 0
+    keys = list(shards[0].keys())
+    merged = {}
+    for k in keys:
+        parts = [shards[r][k] for r in range(world_size)]
+        if isinstance(parts[0], torch.Tensor) and parts[0].dim() >= 1:
+            merged[k] = torch.cat(parts, dim=0)
+        else:
+            # Scalar or non-tensor — just take rank 0
+            merged[k] = parts[0]
+
+    # Free shard memory
+    del shards
+    return merged
+
+
 def convert(step_dir: str | Path, *, force: bool = False) -> Path:
     step_dir = Path(step_dir)
     hf_dir = step_dir / "huggingface"
@@ -38,13 +109,8 @@ def convert(step_dir: str | Path, *, force: bool = False) -> Path:
         print(f"[convert] Already converted: {weights[0].name}")
         return hf_dir
 
-    # Find the FSDP state dict
-    pt_files = sorted(step_dir.glob("model_world_size_*_rank_*.pt"))
-    if not pt_files:
-        raise FileNotFoundError(f"No model_world_size_*_rank_*.pt in {step_dir}")
-
-    print(f"[convert] Loading state_dict from {pt_files[0].name} …")
-    state_dict = torch.load(pt_files[0], map_location="cpu", weights_only=False)
+    # Load and merge all FSDP shards
+    state_dict = _load_and_merge_shards(step_dir)
 
     print(f"[convert] Loading config from {hf_dir} …")
     config = AutoConfig.from_pretrained(hf_dir, trust_remote_code=True)

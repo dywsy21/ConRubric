@@ -7,7 +7,7 @@ requires-python = ">=3.10"
 dependencies = [
     # ── Core ML ──
     "torch==2.6.0",
-    "transformers>=4.46.0",
+    "transformers>=4.46.0,<5.0.0",
     "datasets>=2.14.0",
     "accelerate>=0.25.0",
     "flash-attn",
@@ -35,6 +35,9 @@ dependencies = [
 
     # ── verl extras: trl ──
     "trl<=0.9.6",
+
+    # ── verl extras: vision (required by verl.utils.dataset.vision_utils) ──
+    "qwen-vl-utils",
 
     # ── GRM-specific ──
     "openai",

@@ -295,6 +295,7 @@ class SFTTrainer:
 
         train_time = 0
         total_tokens = 0
+        _tokens_per_step_ema = 0.0  # exponential moving avg for token estimation
         for epoch in range(start_epoch, self.config.trainer.total_epochs):
             self.train_sampler.set_epoch(epoch=epoch)
 
@@ -334,11 +335,26 @@ class SFTTrainer:
                     metrics["train/grad_norm"] = metrics.pop("grad_norm")
                     metrics["train/lr"] = metrics.pop("lr")
                     metrics["train/mfu"] = metrics.pop("mfu")
-                    metrics["train/global_tokens"] = torch.sum(
+                    step_tokens = torch.sum(
                         torch.tensor(batch_seqlens_list, device=self.device_name)
                     ).item()
-                    total_tokens += metrics["train/global_tokens"]
+                    metrics["train/global_tokens"] = step_tokens
+
+                    # Maintain EMA of tokens/step; on the first real step after
+                    # resume, retroactively estimate tokens from prior steps.
+                    if _tokens_per_step_ema == 0.0:
+                        _tokens_per_step_ema = step_tokens
+                        # Estimate total_tokens for steps completed before this run
+                        steps_before = global_step - 1  # steps already done before *this* step
+                        total_tokens = _tokens_per_step_ema * steps_before
+                    else:
+                        _tokens_per_step_ema = 0.9 * _tokens_per_step_ema + 0.1 * step_tokens
+
+                    total_tokens += step_tokens
+                    metrics["train/total_tokens(M)"] = total_tokens / 1e6
                     metrics["train/total_tokens(B)"] = total_tokens / 1e9
+                    metrics["train/epoch"] = epoch + (step_in_epoch + 1) / self.steps_per_epoch
+                    metrics["train/global_step"] = global_step
 
                     if self.engine.get_data_parallel_rank() == 0:
                         tracking.log(data=metrics, step=global_step)

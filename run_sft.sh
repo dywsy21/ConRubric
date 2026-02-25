@@ -1,4 +1,4 @@
-#!/usr/bin/env zsh
+#!/usr/bin/env bash
 set -euo pipefail
 
 # ═══════════════════════════════════════════════════════════════════
@@ -26,6 +26,48 @@ else
   exit 1
 fi
 
+# ── Apply proxy / CUDA from .env ─────────────────────────────────
+if [[ -n "${PROXY_URL:-}" ]]; then
+  export ALL_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" HTTP_PROXY="$PROXY_URL"
+  export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1}"
+  export no_proxy="${NO_PROXY:-localhost,127.0.0.1}"
+fi
+if [[ -n "${CUDA_HOME:-}" ]]; then
+  export PATH="$CUDA_HOME/bin:$PATH"
+fi
+
+# ── Defaults (override in .env) ──────────────────────────────────
+PYTHON_BIN="${PYTHON_BIN:-.venv/bin/python}"
+BASE_MODEL="${BASE_MODEL:-${GRM_MODEL_NAME:-}}"
+LIMIT_PER_DATASET="${LIMIT_PER_DATASET:-100}"
+BENCH_NUM_SAMPLES="${BENCH_NUM_SAMPLES:-120}"
+BENCHMARKS="${BENCHMARKS:-rewardbench ppe rmb healthbench_rubric}"
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-24}"
+EVAL_WORKERS="${EVAL_WORKERS:-6}"
+SFT_EPOCHS="${SFT_EPOCHS:-2}"
+SFT_TRAIN_BATCH="${SFT_TRAIN_BATCH:-32}"
+SFT_MICRO_BATCH="${SFT_MICRO_BATCH:-4}"
+SFT_NPROC="${SFT_NPROC:-1}"
+SFT_OUTPUT_DIR="${SFT_OUTPUT_DIR:-out/sft}"
+SFT_EXPERIMENT_NAME="${SFT_EXPERIMENT_NAME:-grm_sft}"
+SFT_JSONL="${SFT_JSONL:-data/sft_train.jsonl}"
+SFT_LR="${SFT_LR:-1e-4}"
+SFT_LR_SCHEDULER="${SFT_LR_SCHEDULER:-cosine}"
+SFT_LR_WARMUP_RATIO="${SFT_LR_WARMUP_RATIO:-0.05}"
+SFT_MIN_LR_RATIO="${SFT_MIN_LR_RATIO:-0.1}"
+SFT_MAX_LENGTH="${SFT_MAX_LENGTH:-2048}"
+SFT_SAVE_FREQ="${SFT_SAVE_FREQ:-500}"
+SFT_TEST_FREQ="${SFT_TEST_FREQ:--1}"
+SFT_NO_HEALTHBENCH="${SFT_NO_HEALTHBENCH:-0}"
+SFT_NO_SYNTHETIC="${SFT_NO_SYNTHETIC:-0}"
+SFT_SYNTHETIC_PATH="${SFT_SYNTHETIC_PATH:-}"
+PRE_DIR="${PRE_DIR:-out/bench/base}"
+POST_DIR="${POST_DIR:-out/bench/sft}"
+COMPARISON_MD="${COMPARISON_MD:-out/bench/sft/rubric_comparison.md}"
+COMPARISON_JSONL="${COMPARISON_JSONL:-out/bench/sft/rubric_comparison.jsonl}"
+WRITEUP_OUT="${WRITEUP_OUT:-out/sft_writeup.md}"
+POST_MODEL_PATH="${POST_MODEL_PATH:-}"
+
 # ── Parse arguments ───────────────────────────────────────────────
 STAGES=""
 while [[ $# -gt 0 ]]; do
@@ -44,6 +86,7 @@ while [[ $# -gt 0 ]]; do
       echo "  writeup     Write sft_writeup.md"
       echo ""
       echo "Default: run all stages in order."
+      echo "All config is read from .env (see .env.example)."
       exit 0 ;;
     *)
       echo "[ERROR] Unknown argument: $1"; exit 1 ;;
@@ -57,46 +100,20 @@ function should_run() {
   [[ ",$STAGES," == *",$1,"* ]]
 }
 
-# ── Validate required env vars ────────────────────────────────────
-function require_env() {
-  local name="$1"
-  if [[ -z "${(P)name:-}" ]]; then
-    echo "[ERROR] Required env var not set: $name"
-    exit 1
-  fi
-}
-
-require_env PYTHON_BIN
-require_env BASE_MODEL
-require_env LIMIT_PER_DATASET
-require_env BENCH_NUM_SAMPLES
-require_env BENCHMARKS
-require_env EVAL_BATCH_SIZE
-require_env EVAL_WORKERS
-require_env SFT_EPOCHS
-require_env SFT_TRAIN_BATCH
-require_env SFT_MICRO_BATCH
-require_env SFT_NPROC
-require_env SFT_OUTPUT_DIR
-require_env SFT_EXPERIMENT_NAME
-require_env SFT_JSONL
-require_env PRE_DIR
-require_env POST_DIR
-require_env COMPARISON_MD
-require_env COMPARISON_JSONL
-require_env WRITEUP_OUT
-
-POST_MODEL_PATH="${POST_MODEL_PATH:-}"
-
-if [[ ! -x "$PYTHON_BIN" ]]; then
-  echo "[ERROR] Python not found: $PYTHON_BIN"
+# ── Validate essentials ──────────────────────────────────────────
+if [[ -z "$BASE_MODEL" ]]; then
+  echo "[ERROR] BASE_MODEL (or GRM_MODEL_NAME) not set in .env"
+  exit 1
+fi
+if [[ ! -f "$PYTHON_BIN" ]]; then
+  echo "[ERROR] Python not found: $PYTHON_BIN — run ./run_env_preparing.sh first"
   exit 1
 fi
 
 mkdir -p "$PRE_DIR" "$POST_DIR"
 
 function run_step() {
-  echo "\n[STEP] $1"
+  printf '\n[STEP] %s\n' "$1"
 }
 
 # ── Helper: resolve POST_MODEL_PATH from verl checkpoint dir ─────
@@ -152,7 +169,7 @@ function resolve_post_model() {
 function bench_results_exist() {
   local dir="$1"
   local count=0
-  for bm in ${(z)BENCHMARKS}; do
+  for bm in $BENCHMARKS; do
     case "$bm" in
       rewardbench)        [[ -f "$dir/reward_bench_results.json" ]] && (( count++ )) ;;
       ppe)                [[ -f "$dir/ppe_results.json" ]] && (( count++ )) ;;
@@ -161,8 +178,8 @@ function bench_results_exist() {
       *)                  [[ -f "$dir/${bm}_results.json" ]] && (( count++ )) ;;
     esac
   done
-  local expected=${#${(z)BENCHMARKS}}
-  [[ "$count" -ge "$expected" ]]
+  local -a bm_arr=($BENCHMARKS)
+  [[ "$count" -ge "${#bm_arr[@]}" ]]
 }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -170,12 +187,12 @@ function bench_results_exist() {
 # ═══════════════════════════════════════════════════════════════════
 if should_run "bench-pre"; then
   if bench_results_exist "$PRE_DIR"; then
-    echo "\n[SKIP] Pre-SFT benchmark — results already exist in $PRE_DIR"
+    printf '\n[SKIP] Pre-SFT benchmark — results already exist in %s\n' "$PRE_DIR"
   else
     run_step "1/6 Pre-SFT benchmark"
     "$PYTHON_BIN" -m src.evaluation.run_benchmark \
       --model_path "$BASE_MODEL" \
-      --benchmarks ${(z)BENCHMARKS} \
+      --benchmarks $BENCHMARKS \
       --num_samples "$BENCH_NUM_SAMPLES" \
       --eval_batch_size "$EVAL_BATCH_SIZE" \
       --eval_workers "$EVAL_WORKERS" \
@@ -187,19 +204,29 @@ fi
 # Stage 2: Prepare mixed SFT data
 # ═══════════════════════════════════════════════════════════════════
 if should_run "prep"; then
-  run_step "2/6 Prepare mixed SFT data (HealthBench+synthetic, each limit=$LIMIT_PER_DATASET)"
+  run_step "2/6 Prepare mixed SFT data"
   PREPARE_ARGS=(
     -m src.training.sft_trainer
     --prepare-only
-    --healthbench-limit "$LIMIT_PER_DATASET"
-    --synthetic-limit "$LIMIT_PER_DATASET"
     --output-jsonl "$SFT_JSONL"
     --preview-samples 2
   )
+  if [[ "$SFT_NO_HEALTHBENCH" == "1" ]]; then
+    PREPARE_ARGS+=(--no-healthbench)
+  else
+    PREPARE_ARGS+=(--healthbench-limit "$LIMIT_PER_DATASET")
+  fi
+  if [[ "$SFT_NO_SYNTHETIC" == "1" ]]; then
+    PREPARE_ARGS+=(--no-synthetic)
+  elif [[ -n "$SFT_SYNTHETIC_PATH" ]]; then
+    PREPARE_ARGS+=(--synthetic-path "$SFT_SYNTHETIC_PATH")
+  else
+    PREPARE_ARGS+=(--synthetic-limit "$LIMIT_PER_DATASET")
+  fi
   if [[ "${REBUILD_SPLIT:-0}" == "1" ]]; then
     PREPARE_ARGS+=(--rebuild-healthbench-split)
   fi
-  "$PYTHON_BIN" ${PREPARE_ARGS[@]}
+  "$PYTHON_BIN" "${PREPARE_ARGS[@]}"
 fi
 
 # ═══════════════════════════════════════════════════════════════════
@@ -210,21 +237,38 @@ if should_run "train"; then
     run_step "3/6 Run weighted verl SFT"
     TRAIN_ARGS=(
       -m src.training.sft_trainer
-      --healthbench-limit "$LIMIT_PER_DATASET"
-      --synthetic-limit "$LIMIT_PER_DATASET"
       --epochs "$SFT_EPOCHS"
       --train-batch-size "$SFT_TRAIN_BATCH"
       --micro-batch-size-per-gpu "$SFT_MICRO_BATCH"
       --nproc-per-node "$SFT_NPROC"
+      --max-length "$SFT_MAX_LENGTH"
+      --lr "$SFT_LR"
+      --lr-scheduler-type "$SFT_LR_SCHEDULER"
+      --lr-warmup-ratio "$SFT_LR_WARMUP_RATIO"
+      --min-lr-ratio "$SFT_MIN_LR_RATIO"
       --project-name grm-sft
       --experiment-name "$SFT_EXPERIMENT_NAME"
       --output-dir "$SFT_OUTPUT_DIR"
-      --save-freq -1
-      --test-freq -1
+      --save-freq "$SFT_SAVE_FREQ"
+      --test-freq "$SFT_TEST_FREQ"
+      --preview-samples 2
     )
-    "$PYTHON_BIN" ${TRAIN_ARGS[@]}
+    # Data source selection
+    if [[ "$SFT_NO_HEALTHBENCH" == "1" ]]; then
+      TRAIN_ARGS+=(--no-healthbench)
+    else
+      TRAIN_ARGS+=(--healthbench-limit "$LIMIT_PER_DATASET")
+    fi
+    if [[ "$SFT_NO_SYNTHETIC" == "1" ]]; then
+      TRAIN_ARGS+=(--no-synthetic)
+    elif [[ -n "$SFT_SYNTHETIC_PATH" ]]; then
+      TRAIN_ARGS+=(--synthetic-path "$SFT_SYNTHETIC_PATH")
+    else
+      TRAIN_ARGS+=(--synthetic-limit "$LIMIT_PER_DATASET")
+    fi
+    "$PYTHON_BIN" "${TRAIN_ARGS[@]}"
   else
-    echo "\n[SKIP] SFT training (RUN_SFT=0)"
+    printf '\n[SKIP] SFT training (RUN_SFT=0)\n'
   fi
 fi
 
@@ -241,7 +285,7 @@ if should_run "bench-post"; then
   run_step "4/6 Post-SFT benchmark"
   "$PYTHON_BIN" -m src.evaluation.run_benchmark \
     --model_path "$POST_MODEL_PATH" \
-    --benchmarks ${(z)BENCHMARKS} \
+    --benchmarks $BENCHMARKS \
     --num_samples "$BENCH_NUM_SAMPLES" \
     --eval_batch_size "$EVAL_BATCH_SIZE" \
     --eval_workers "$EVAL_WORKERS" \
@@ -289,7 +333,7 @@ if should_run "writeup"; then
     --output "$WRITEUP_OUT"
 fi
 
-echo "\n[DONE] SFT pipeline completed."
+printf '\n[DONE] SFT pipeline completed.\n'
 echo "- writeup:          $WRITEUP_OUT"
 echo "- pre benchmark:    $PRE_DIR"
 echo "- post benchmark:   $POST_DIR"
