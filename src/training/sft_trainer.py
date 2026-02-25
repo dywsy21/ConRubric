@@ -202,6 +202,9 @@ def _run_verl_sft(args, config: ProjectConfig, train_file: str):
         f"+data.max_weight={args.max_weight}",
         f"+data.sft_instruction_template={json.dumps(RUBRIC_GENERATION_PROMPT)}",
         f"optim.lr={args.lr}",
+        f"optim.lr_scheduler_type={args.lr_scheduler_type}",
+        f"optim.lr_warmup_steps_ratio={args.lr_warmup_ratio}",
+        f"optim.min_lr_ratio={args.min_lr_ratio}",
         f"trainer.total_epochs={args.epochs}",
         f"trainer.project_name={args.project_name}",
         f"trainer.experiment_name={args.experiment_name}",
@@ -240,7 +243,10 @@ def build_arg_parser():
     parser.add_argument("--train-batch-size", type=int, default=64)
     parser.add_argument("--micro-batch-size-per-gpu", type=int, default=2)
     parser.add_argument("--epochs", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--lr", type=float, default=5e-5)
+    parser.add_argument("--lr-scheduler-type", type=str, default="cosine", choices=["constant", "cosine"])
+    parser.add_argument("--lr-warmup-ratio", type=float, default=0.05, help="Warmup steps as fraction of total steps")
+    parser.add_argument("--min-lr-ratio", type=float, default=0.1, help="Min LR as fraction of peak LR (for cosine)")
     parser.add_argument("--nproc-per-node", type=int, default=1)
 
     parser.add_argument("--project-name", type=str, default="grm-sft")
