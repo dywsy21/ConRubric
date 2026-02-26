@@ -6,7 +6,10 @@ from typing import List, Optional
 from src.utils.prompts import RUBRIC_GENERATION_PROMPT
 
 class RubricGenerator:
-    def __init__(self, model_name_or_path: str, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+    def __init__(self, model_name_or_path: str, device: str = "auto"):
+        if device == "auto":
+            from model_worker import best_device
+            device = best_device()
         self.device = device
         print(f"Loading Rubric Generator (GRM) from: {model_name_or_path} on {device}")
         try:

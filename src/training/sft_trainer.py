@@ -1,4 +1,5 @@
 import argparse
+import glob
 import json
 import os
 import subprocess
@@ -169,10 +170,150 @@ def _build_weighted_sft_jsonl(args, config: ProjectConfig) -> str:
     return output_jsonl
 
 
-def _run_verl_sft(args, config: ProjectConfig, train_file: str):
-    # verl SFT requires distributed env; torchrun handles this even for single GPU.
-    nproc = str(args.nproc_per_node)
+def _merge_fsdp_checkpoint_if_needed(output_dir: str, nproc: int) -> Optional[str]:
+    """Check if latest checkpoint was saved with a different world_size.
 
+    When elastic scaling changes the GPU count, FSDP sharded checkpoints
+    cannot be loaded because the filenames contain the old world_size.
+    This function detects the mismatch and merges the FSDP shards into
+    HuggingFace format so training can restart from the merged weights.
+
+    Returns the path to the HF model directory if conversion was needed,
+    or ``None`` if no conversion is required (same world_size or no ckpt).
+    """
+    tracker = os.path.join(output_dir, "latest_checkpointed_iteration.txt")
+    if not os.path.exists(tracker):
+        return None
+
+    with open(tracker) as f:
+        step = f.read().strip()
+    ckpt_dir = os.path.join(output_dir, f"global_step_{step}")
+
+    fsdp_config_path = os.path.join(ckpt_dir, "fsdp_config.json")
+    if not os.path.exists(fsdp_config_path):
+        return None
+
+    with open(fsdp_config_path) as f:
+        fsdp_cfg = json.load(f)
+    ckpt_world_size = fsdp_cfg.get("world_size")
+    if ckpt_world_size is None or ckpt_world_size == nproc:
+        return None  # same world_size → normal resume works
+
+    hf_path = os.path.join(ckpt_dir, "huggingface")
+
+    # Check if HF model weights already exist (not just config/tokenizer).
+    hf_weight_files = (
+        glob.glob(os.path.join(hf_path, "model*.safetensors"))
+        + glob.glob(os.path.join(hf_path, "model*.bin"))
+    )
+    if hf_weight_files:
+        print(
+            f"[elastic] World-size mismatch (ckpt={ckpt_world_size}, "
+            f"new={nproc}) but HF weights already at {hf_path}"
+        )
+        return hf_path
+
+    # ── Merge FSDP shards → HuggingFace ───────────────────────────
+    print(
+        f"[elastic] World-size mismatch: checkpoint has {ckpt_world_size} "
+        f"ranks, new nproc={nproc}"
+    )
+    print(f"[elastic] Merging FSDP checkpoint → HF format …")
+
+    from verl.model_merger.base_model_merger import ModelMergerConfig
+    from verl.model_merger.fsdp_model_merger import FSDPModelMerger
+
+    merge_config = ModelMergerConfig(
+        operation="merge",
+        backend="fsdp",
+        local_dir=ckpt_dir,
+        target_dir=hf_path,
+        hf_model_config_path=hf_path,  # config.json already saved here
+        trust_remote_code=True,
+    )
+    merger = FSDPModelMerger(merge_config)
+    merger.merge_and_save()
+    print(f"[elastic] Merged checkpoint saved to {hf_path}")
+    return hf_path
+
+
+def _run_verl_sft(args, config: ProjectConfig, train_file: str):
+    if args.no_elastic:
+        _run_verl_sft_static(args, config, train_file)
+    else:
+        _run_verl_sft_elastic(args, config, train_file)
+
+
+def _run_verl_sft_static(args, config: ProjectConfig, train_file: str):
+    """Fixed-GPU SFT launch (no elastic scaling)."""
+    from model_worker import device_scope
+
+    with device_scope(
+        min_devices=max(args.nproc_per_node, args.min_devices),
+        max_devices=args.max_devices,
+        warmup=True,
+        poll_interval=30.0,
+        verbose=True,
+    ) as slot:
+        nproc = str(slot.count)
+        slot.release()
+        proc = _launch_verl_sft(args, config, train_file, nproc)
+        proc.wait()
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, proc.args)
+
+
+def _run_verl_sft_elastic(args, config: ProjectConfig, train_file: str):
+    """Elastic SFT — restart with more GPUs when they appear after checkpoints."""
+    from model_worker.elastic import elastic_run
+
+    checkpoint_dir = os.path.abspath(args.output_dir)
+    checkpoint_indicator = os.path.join(
+        checkpoint_dir, "latest_checkpointed_iteration.txt"
+    )
+
+    def launch_fn(nproc: int, cuda_visible: str) -> subprocess.Popen:
+        # Check if we need to convert the checkpoint for a world-size change.
+        model_path_override = None
+        resume_mode = "auto"
+        hf_path = _merge_fsdp_checkpoint_if_needed(checkpoint_dir, nproc)
+        if hf_path is not None:
+            model_path_override = os.path.abspath(hf_path)
+            resume_mode = "disable"
+            print(
+                f"[elastic] Restarting from merged HF weights at "
+                f"{model_path_override} (resume_mode=disable)"
+            )
+        return _launch_verl_sft(
+            args, config, train_file, str(nproc),
+            model_path_override=model_path_override,
+            resume_mode=resume_mode,
+        )
+
+    rc = elastic_run(
+        launch_fn=launch_fn,
+        checkpoint_indicator=checkpoint_indicator,
+        min_devices=max(args.nproc_per_node, args.min_devices),
+        max_devices=args.max_devices,
+        check_interval=args.elastic_check_interval,
+        warmup=True,
+        verbose=True,
+    )
+    if rc != 0:
+        raise RuntimeError(f"SFT training failed with exit code {rc}")
+
+
+def _launch_verl_sft(
+    args,
+    config: ProjectConfig,
+    train_file: str,
+    nproc: str,
+    *,
+    model_path_override: Optional[str] = None,
+    resume_mode: str = "auto",
+):
+    model_path = model_path_override or config.grm_model_name
+    # verl SFT requires distributed env; torchrun handles this even for single GPU.
     cmd = [
         sys.executable,
         "-m",
@@ -183,7 +324,7 @@ def _run_verl_sft(args, config: ProjectConfig, train_file: str):
         "verl.trainer.sft_trainer",
         "--config-name",
         "sft_trainer_engine",
-        f"model.path={config.grm_model_name}",
+        f"model.path={model_path}",
         "model.trust_remote_code=True",
         "+model.override_config.attn_implementation=sdpa",
         "engine.model_dtype=bf16",
@@ -208,12 +349,13 @@ def _run_verl_sft(args, config: ProjectConfig, train_file: str):
         f"trainer.total_epochs={args.epochs}",
         f"trainer.project_name={args.project_name}",
         f"trainer.experiment_name={args.experiment_name}",
-        f"trainer.n_gpus_per_node={args.nproc_per_node}",
+        f"trainer.n_gpus_per_node={int(nproc)}",
         "trainer.nnodes=1",
         f"trainer.save_freq={args.save_freq}",
         f"trainer.test_freq={args.test_freq}",
         "trainer.logger=['console']",
         f"trainer.default_local_dir={args.output_dir}",
+        f"trainer.resume_mode={resume_mode}",
         "engine.use_torch_compile=False",
     ]
 
@@ -221,7 +363,7 @@ def _run_verl_sft(args, config: ProjectConfig, train_file: str):
     print(" ".join(cmd))
     env = os.environ.copy()
     env["HYDRA_FULL_ERROR"] = "1"
-    subprocess.run(cmd, check=True, env=env)
+    return subprocess.Popen(cmd, env=env)
 
 
 def build_arg_parser():
@@ -248,6 +390,10 @@ def build_arg_parser():
     parser.add_argument("--lr-warmup-ratio", type=float, default=0.05, help="Warmup steps as fraction of total steps")
     parser.add_argument("--min-lr-ratio", type=float, default=0.1, help="Min LR as fraction of peak LR (for cosine)")
     parser.add_argument("--nproc-per-node", type=int, default=1)
+    parser.add_argument("--min-devices", type=int, default=2, help="Minimum GPU count for elastic scaling")
+    parser.add_argument("--max-devices", type=int, default=8, help="Maximum GPU count for elastic scaling")
+    parser.add_argument("--no-elastic", action="store_true", help="Disable elastic GPU scaling (fixed device count)")
+    parser.add_argument("--elastic-check-interval", type=float, default=60.0, help="Seconds between GPU expansion checks")
 
     parser.add_argument("--project-name", type=str, default="grm-sft")
     parser.add_argument("--experiment-name", type=str, default="healthbench_weighted")
