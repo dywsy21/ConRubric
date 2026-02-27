@@ -150,8 +150,21 @@ class CheckpointHandler:
             return 0
         self.resume_global_step = resume_step
 
-        # Use checkpoint manager to load model state
-        self.engine.load_checkpoint(checkpoint_path)
+        if self.resume_mode == "metadata_only":
+            # Skip FSDP model shard loading (model weights already loaded
+            # from a merged HF checkpoint via model.path override).
+            # Only restore step counter + dataloader state.
+            log_with_rank(
+                f"metadata_only resume: skipping FSDP model load, "
+                f"restoring step={resume_step} + dataloader state from {checkpoint_path}",
+                logger=logger,
+                rank=self.rank,
+                log_only_rank_0=True,
+            )
+        else:
+            # Use checkpoint manager to load model state
+            self.engine.load_checkpoint(checkpoint_path)
+
         # Always load dataloader state for StatefulDataLoader
         self._load_dataloader_state(checkpoint_path)
 
@@ -190,6 +203,9 @@ class CheckpointHandler:
 
         if resume_mode == "disable":
             return None
+        elif resume_mode == "metadata_only":
+            # Like "auto" but caller will skip model loading.
+            return self._find_latest_checkpoint()
         elif resume_mode == "auto":
             if resume_from_path is not None:
                 assert os.path.exists(resume_from_path), (
@@ -206,7 +222,7 @@ class CheckpointHandler:
             assert "global_step_" in resume_from_path, "resume_from_path must specify the global_steps"
             return resume_from_path
         else:
-            raise ValueError(f"Invalid resume_mode: {resume_mode}. Must be 'auto', 'disable', or 'resume_path'")
+            raise ValueError(f"Invalid resume_mode: {resume_mode}. Must be 'auto', 'disable', 'metadata_only', or 'resume_path'")
 
     def _find_latest_checkpoint(self):
         """Find the latest checkpoint in the default local directory"""

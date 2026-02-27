@@ -279,10 +279,14 @@ def _run_verl_sft_elastic(args, config: ProjectConfig, train_file: str):
         hf_path = _merge_fsdp_checkpoint_if_needed(checkpoint_dir, nproc)
         if hf_path is not None:
             model_path_override = os.path.abspath(hf_path)
-            resume_mode = "disable"
+            # Use "metadata_only" so verl restores the step counter and
+            # dataloader position from the checkpoint WITHOUT trying to
+            # load the (incompatible) FSDP model shards — the model
+            # weights are already supplied via model_path_override.
+            resume_mode = "metadata_only"
             print(
                 f"[elastic] Restarting from merged HF weights at "
-                f"{model_path_override} (resume_mode=disable)"
+                f"{model_path_override} (resume_mode=metadata_only)"
             )
         return _launch_verl_sft(
             args, config, train_file, str(nproc),
