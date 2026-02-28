@@ -153,10 +153,15 @@ class CheckpointHandler:
         if self.resume_mode == "metadata_only":
             # Skip FSDP model shard loading (model weights already loaded
             # from a merged HF checkpoint via model.path override).
-            # Only restore step counter + dataloader state.
+            # Also skip dataloader state — it was saved with a different
+            # world_size so the DistributedSampler positions are incompatible
+            # (restoring them causes StopIteration when the new sampler is
+            # shorter than the saved position).
+            # Only restore the step counter; the dataloader restarts from the
+            # beginning of the current epoch which is safe (minor data re-exposure).
             log_with_rank(
-                f"metadata_only resume: skipping FSDP model load, "
-                f"restoring step={resume_step} + dataloader state from {checkpoint_path}",
+                f"metadata_only resume: skipping FSDP model load + dataloader state, "
+                f"restoring step={resume_step} from {checkpoint_path}",
                 logger=logger,
                 rank=self.rank,
                 log_only_rank_0=True,
@@ -165,8 +170,9 @@ class CheckpointHandler:
             # Use checkpoint manager to load model state
             self.engine.load_checkpoint(checkpoint_path)
 
-        # Always load dataloader state for StatefulDataLoader
-        self._load_dataloader_state(checkpoint_path)
+            # Load dataloader state for StatefulDataLoader
+            # (only when world_size matches — i.e. normal auto resume)
+            self._load_dataloader_state(checkpoint_path)
 
         return resume_step
 
