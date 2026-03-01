@@ -262,15 +262,29 @@ class Judge:
             return None
             
         try:
-            # Attempt to find JSON
-            start = response_text.find('{')
-            end = response_text.rfind('}') + 1
-            if start != -1 and end != 0:
-                json_str = response_text[start:end]
+            # Strip <think>...</think> blocks (Qwen3-style chain-of-thought)
+            cleaned = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
+            if not cleaned:
+                cleaned = response_text  # fallback if stripping removed everything
+
+            # Attempt to find the FIRST complete JSON object
+            start = cleaned.find('{')
+            if start != -1:
+                # Find the matching closing brace for the first object
+                depth = 0
+                end = start
+                for i in range(start, len(cleaned)):
+                    if cleaned[i] == '{':
+                        depth += 1
+                    elif cleaned[i] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            end = i + 1
+                            break
+
+                json_str = cleaned[start:end]
                 
                 # Fix common JSON escape issues
-                # Replace problematic escape sequences
-                import re
                 # Fix invalid escapes like \_ \* etc by escaping the backslash
                 json_str = re.sub(r'\\([^"\\/bfnrtu])', r'\\\\\1', json_str)
                 
@@ -294,8 +308,11 @@ class Judge:
                     return None
             else:
                 # Try to extract score using regex as fallback
-                import re
-                score_match = re.search(r'"?(?:score|overall)"?\s*[:=]\s*(\d+(?:\.\d+)?)', response_text, re.IGNORECASE)
+                score_match = re.search(r'"?(?:score|overall)"?\s*[:=]\s*(\d+(?:\.\d+)?)', cleaned, re.IGNORECASE)
+                if score_match:
+                    return float(score_match.group(1))
+                # Also try bare number after common patterns
+                score_match = re.search(r'\b(\d+(?:\.\d+)?)\s*/\s*10\b', cleaned)
                 if score_match:
                     return float(score_match.group(1))
                 print("Could not find JSON in evaluation response")

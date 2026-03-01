@@ -33,17 +33,24 @@ class RubricGenerator:
 
         # Wrap in chat template so the model treats it as an instruction.
         # Use default template (matches SFT training in weighted_sft_dataset.py).
+        # Disable thinking mode (Qwen3) to avoid wasting tokens on <think> blocks.
         messages = [{"role": "user", "content": prompt}]
-        input_ids = self.tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, return_tensors="pt"
-        ).to(self.device)
+        tpl_kwargs = {"add_generation_prompt": True, "return_tensors": "pt"}
+        try:
+            input_ids = self.tokenizer.apply_chat_template(
+                messages, enable_thinking=False, **tpl_kwargs
+            ).to(self.device)
+        except TypeError:
+            input_ids = self.tokenizer.apply_chat_template(
+                messages, **tpl_kwargs
+            ).to(self.device)
         attention_mask = torch.ones_like(input_ids)
 
         with torch.no_grad():
             outputs = self.model.generate(
                 input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=512,
+                max_new_tokens=1024,
                 temperature=0.7,
                 do_sample=True,
             )
