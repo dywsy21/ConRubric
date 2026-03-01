@@ -1,17 +1,35 @@
 import os
+import random
 import threading
 import torch
 import numpy as np
-from typing import List, Dict, Tuple
+from typing import List, Dict, Optional, Tuple
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, Future, as_completed
 from tqdm import tqdm
 from src.evaluation.judge import Oracle
 from src.models.solver import Solver
+from src.training.matrix_completion import als_matrix_completion
+from src.training.rubric_quality import (
+    RubricQualityConfig,
+    score_rubric_quality,
+)
 
 # Per-service parallel settings
 DEFAULT_SOLVER_WORKERS = int(os.environ.get("GRM_SOLVER_WORKERS", 4))
 DEFAULT_ORACLE_WORKERS = int(os.environ.get("GRM_ORACLE_WORKERS", 4))
+
+# K-sparse cross-evaluation: 0 means "use all N-1" (full matrix, backward compat)
+K_SPARSE = int(os.environ.get("GRM_K_SPARSE", "0"))
+
+# Matrix completion after K-sparse observation
+USE_MATRIX_COMPLETION = os.environ.get("GRM_USE_MATRIX_COMPLETION", "false").lower() in ("1", "true", "yes")
+MC_RANK = int(os.environ.get("GRM_MC_RANK", "3"))
+MC_MAX_ITER = int(os.environ.get("GRM_MC_MAX_ITER", "30"))
+MC_REG = float(os.environ.get("GRM_MC_REG", "0.1"))
+
+# Rubric quality scoring
+RUBRIC_QUALITY_CONFIG = RubricQualityConfig()
 
 class MetaRewardFunction:
     def __init__(self, solver_model_name: str, oracle_model_name: str, 
@@ -79,18 +97,18 @@ class MetaRewardFunction:
                        solver_workers: int = None,
                        oracle_workers: int = None) -> torch.Tensor:
         """
-        Computes the Consensus-Based Meta-Reward with pipelined execution.
+        Computes the Consensus-Based Meta-Reward with pipelined execution,
+        K-sparse cross-evaluation, optional matrix completion, and rubric
+        quality adjustments.
 
-        All questions are processed concurrently: while remote Solver/Oracle
-        calls are in-flight for question i, work for question i+1 is already
-        being submitted.  Two shared thread-pools (solver_pool, oracle_pool)
-        enforce per-service concurrency limits.
-
-        Pipeline per question:
+        Pipeline per question (N rollouts → N rubrics):
             1. Generate N answers via Solver (parallel within solver_pool)
-            2. As soon as ALL answers for a question arrive, submit N*(N-1)
-               cross-evaluation tasks to the oracle_pool.
-            3. When all evals finish, compute per-rubric reward.
+            2. K-sparse selection: for each rubric j, pick min(K, N-1) other
+               rubrics to evaluate against (K=0 → full N-1, backward compat)
+            3. Oracle scores only selected (answer, rubric) pairs → O(NK) calls
+            4. Optionally apply ALS matrix completion on sparse score matrix
+            5. Compute cross-consensus reward from (completed) matrix
+            6. Add rubric quality adjustment (repetition/diversity/length)
 
         Every rollout gets its own reward for proper RL policy gradients.
         """
@@ -99,8 +117,13 @@ class MetaRewardFunction:
         if oracle_workers is None:
             oracle_workers = DEFAULT_ORACLE_WORKERS
 
+        k_sparse = K_SPARSE
+        use_mc = USE_MATRIX_COMPLETION
+
         print(f"[MetaReward] Computing rewards for {len(questions)} samples, "
-              f"solver_workers={solver_workers}, oracle_workers={oracle_workers}")
+              f"solver_workers={solver_workers}, oracle_workers={oracle_workers}, "
+              f"K_sparse={k_sparse or 'full'}, matrix_completion={use_mc}, "
+              f"rubric_quality={RUBRIC_QUALITY_CONFIG.enabled}")
 
         # ── Group by question ──────────────────────────────────────────
         q_to_rubrics: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
@@ -111,6 +134,13 @@ class MetaRewardFunction:
         print(f"[MetaReward] Processing {len(q_items)} unique questions (pipelined)")
 
         rewards = torch.zeros(len(questions), dtype=torch.float32)
+
+        # ── Pre-compute rubric quality adjustments ─────────────────────
+        quality_adjustments = np.zeros(len(questions), dtype=np.float32)
+        if RUBRIC_QUALITY_CONFIG.enabled:
+            for idx, rubric in enumerate(rubrics):
+                result = score_rubric_quality(rubric, RUBRIC_QUALITY_CONFIG)
+                quality_adjustments[idx] = result.total_adjustment
 
         # Shared thread-pools – one for each remote service.
         solver_pool = ThreadPoolExecutor(max_workers=max(1, solver_workers))
@@ -139,18 +169,55 @@ class MetaRewardFunction:
             _log_progress("solver")
             return ans
 
-        # ── Helper: evaluate N answers against ONE rubric (batch) ──────
-        # The judge sees all answers side-by-side, producing *relative*
-        # scores calibrated against each other.
+        # ── Helper: evaluate selected answers against ONE rubric ───────
         def _eval_batch_by_rubric(q: str, answers: List[str], rubric: str) -> List[float]:
-            """Returns N scores, one per answer, all relative to each other."""
+            """Returns len(answers) scores, all relative to each other."""
             scores = self.oracle.evaluate_answers_by_rubric(q, answers, rubric)
             with progress_lock:
                 progress["eval_done"] += len(answers)
             return scores
 
+        # ── K-sparse rubric selection ──────────────────────────────────
+        def _select_rubric_indices(n: int, k: int) -> List[List[int]]:
+            """For each of N rubrics, select K other rubric indices to evaluate.
+
+            Returns eval_sets[j] = list of rubric indices that rubric j will
+            evaluate (i.e., answers from those rubrics will be scored by rubric j).
+
+            When K >= N-1, returns full cross-eval (all j != i).
+            """
+            if k <= 0 or k >= n - 1:
+                # Full evaluation: each rubric evaluates all others
+                return [list(range(n)) for _ in range(n)]
+
+            # Random K-sparse: each answer i is evaluated by K randomly
+            # chosen rubrics j.  We build this from the answer perspective
+            # then invert to rubric perspective.
+            #
+            # For each answer i, sample K rubrics from {0..N-1}\{i}
+            answer_to_rubrics: Dict[int, List[int]] = {}
+            for i in range(n):
+                candidates = [j for j in range(n) if j != i]
+                chosen = sorted(random.sample(candidates, min(k, len(candidates))))
+                answer_to_rubrics[i] = chosen
+
+            # Invert: rubric_to_answers[j] = which answers rubric j needs to score
+            rubric_to_answers: Dict[int, List[int]] = defaultdict(list)
+            for i, rubs in answer_to_rubrics.items():
+                for j in rubs:
+                    rubric_to_answers[j].append(i)
+
+            # Return as list-of-lists indexed by rubric j.
+            # Include j itself so the oracle always sees a full ranking context
+            # (diagonal will be excluded from reward later).
+            eval_sets = []
+            for j in range(n):
+                answer_indices = sorted(set(rubric_to_answers.get(j, [])) | {j})
+                eval_sets.append(answer_indices)
+
+            return eval_sets
+
         # ── Phase 1: Submit ALL solver tasks across ALL questions ──────
-        # solver_futures[q_idx] = list of (rubric_local_idx, Future[str])
         solver_futures: Dict[int, List[Tuple[int, Future]]] = {}
 
         for q_idx, (q, items) in enumerate(q_items):
@@ -159,7 +226,6 @@ class MetaRewardFunction:
                 progress["solver_total"] += n
 
             if n < 2:
-                # Degenerate case – still submit to solver_pool for uniformity
                 idx0, r0 = items[0]
                 fut = solver_pool.submit(_gen_answer, q, r0)
                 solver_futures[q_idx] = [(0, fut)]
@@ -170,50 +236,52 @@ class MetaRewardFunction:
                     futs.append((local_i, fut))
                 solver_futures[q_idx] = futs
 
-        # ── Phase 2: For each question, wait for its answers then
-        #    immediately submit cross-eval tasks.  A coordinator thread
-        #    per question handles this so questions overlap. ─────────────
-        # eval_futures[q_idx] = list of (i, j, Future[float])
-        eval_futures: Dict[int, List[Tuple[int, int, Future]]] = {}
+        # ── Phase 2: Coordinate evaluation per question ────────────────
+        eval_futures: Dict[int, List] = {}
+        # Store the eval_sets for reward computation
+        eval_sets_per_q: Dict[int, List[List[int]]] = {}
         coordinator_futures: List[Future] = []
         coordinator_pool = ThreadPoolExecutor(max_workers=len(q_items))
 
         def _coordinate_question(q_idx: int, q: str, items: List[Tuple[int, str]], n: int):
-            """Wait for this question's solver results, then submit oracle evals.
-
-            Instead of N*(N-1) individual oracle calls, we make N batch calls:
-            for each rubric rⱼ, score ALL N answers in one LLM call.  This
-            gives the judge full context to produce relative scores.
-            """
+            """Wait for solver results, then submit K-sparse oracle evals."""
             # Collect answers in order
             answers = [""] * n
             for local_i, fut in solver_futures[q_idx]:
                 try:
-                    answers[local_i] = fut.result(timeout=900)  # 15 min max
+                    answers[local_i] = fut.result(timeout=900)
                 except Exception as e:
                     print(f"[MetaReward] Solver error Q{q_idx} rubric {local_i}: {e}")
 
             if n < 2:
-                # Single rubric – direct eval, no cross-eval
                 with progress_lock:
                     progress["eval_total"] += 1
                 fut = oracle_pool.submit(
                     _eval_batch_by_rubric, q, [answers[0]], items[0][1]
                 )
                 eval_futures[q_idx] = [("single", fut)]
+                eval_sets_per_q[q_idx] = [[0]]
                 return
 
-            # For each rubric rⱼ, score ALL answers in one batch call.
-            # This produces N scores per call (N calls total instead of N*(N-1)).
-            batch_futs = []
+            # K-sparse selection
+            eval_sets = _select_rubric_indices(n, k_sparse)
+            eval_sets_per_q[q_idx] = eval_sets
+
+            # Count total eval items for progress
+            total_evals = sum(len(es) for es in eval_sets)
             with progress_lock:
-                progress["eval_total"] += n * n  # N answers × N rubrics
+                progress["eval_total"] += total_evals
+
+            # Submit one batch call per rubric j, but only with selected answers
+            batch_futs = []
             for j in range(n):
+                answer_indices = eval_sets[j]
+                selected_answers = [answers[ai] for ai in answer_indices]
                 rubric_j = items[j][1]
                 fut = oracle_pool.submit(
-                    _eval_batch_by_rubric, q, answers, rubric_j
+                    _eval_batch_by_rubric, q, selected_answers, rubric_j
                 )
-                batch_futs.append((j, fut))
+                batch_futs.append((j, answer_indices, fut))
             eval_futures[q_idx] = batch_futs
 
         for q_idx, (q, items) in enumerate(q_items):
@@ -221,42 +289,80 @@ class MetaRewardFunction:
             cfut = coordinator_pool.submit(_coordinate_question, q_idx, q, items, n)
             coordinator_futures.append(cfut)
 
-        # ── Phase 3: Wait for all coordinators (i.e. all oracle tasks
-        #    have been submitted), then collect results. ─────────────────
+        # ── Phase 3: Collect results and compute rewards ───────────────
         for cfut in coordinator_futures:
-            cfut.result()  # raises on error
+            cfut.result()
 
-        # Now all oracle futures are in eval_futures. Collect them.
         for q_idx, (q, items) in enumerate(q_items):
-            indices = [it[0] for it in items]
+            indices = [it[0] for it in items]  # global indices
             n = len(items)
 
             if n < 2:
-                # Single rubric
                 tag, fut = eval_futures[q_idx][0]
                 try:
                     scores = fut.result(timeout=900)
-                    rewards[indices[0]] = scores[0] if scores else 0.0
+                    consensus_reward = scores[0] if scores else 0.0
                 except Exception as e:
                     print(f"[MetaReward] Eval error Q{q_idx}: {e}")
-                    rewards[indices[0]] = 0.0
+                    consensus_reward = 0.0
+                # Combined reward
+                qa = quality_adjustments[indices[0]] if RUBRIC_QUALITY_CONFIG.enabled else 0.0
+                rewards[indices[0]] = consensus_reward + qa
             else:
-                # score_matrix[i][j] = score of answer_i under rubric_j
-                # Each batch call returns N scores for all answers under one rubric.
-                score_matrix = np.zeros((n, n))
-                for j, fut in eval_futures[q_idx]:
+                # Build sparse score matrix
+                score_matrix = np.full((n, n), np.nan)
+                mask = np.zeros((n, n), dtype=np.float64)
+
+                for j, answer_indices, fut in eval_futures[q_idx]:
                     try:
-                        scores = fut.result(timeout=900)  # List[float] of length N
-                        for i in range(n):
-                            score_matrix[i][j] = scores[i]
+                        scores = fut.result(timeout=900)
+                        for pos, ai in enumerate(answer_indices):
+                            score_matrix[ai][j] = scores[pos]
+                            mask[ai][j] = 1.0
                     except Exception as e:
                         print(f"[MetaReward] Eval error Q{q_idx} rubric {j}: {e}")
 
-                # Reward for rubric_i = mean score of answer_i under all OTHER rubrics
+                # Replace NaN with 0 for matrix operations
+                observed = np.nan_to_num(score_matrix, nan=0.0)
+
+                # Optional matrix completion
+                if use_mc and mask.sum() < n * n and n >= 3:
+                    try:
+                        completed = als_matrix_completion(
+                            observed, mask,
+                            rank=min(MC_RANK, n - 1),
+                            max_iter=MC_MAX_ITER,
+                            reg=MC_REG,
+                        )
+                        # Use completed matrix for reward, but mark
+                        # which entries are real vs imputed
+                        reward_matrix = completed
+                        # Log completion stats
+                        n_imputed = int((1 - mask).sum())
+                        print(f"[MetaReward]   Q{q_idx}: matrix completion "
+                              f"imputed {n_imputed}/{n*n} entries")
+                    except Exception as e:
+                        print(f"[MetaReward]   Q{q_idx}: MC failed ({e}), "
+                              f"using sparse rewards")
+                        reward_matrix = observed
+                else:
+                    reward_matrix = observed
+
+                # Compute cross-consensus reward per rubric
                 for i in range(n):
-                    off_diag = [score_matrix[i][j] for j in range(n) if j != i]
-                    avg_score = sum(off_diag) / len(off_diag) if off_diag else 0.0
-                    rewards[indices[i]] = avg_score
+                    if use_mc and mask.sum() < n * n:
+                        # With MC: use all off-diagonal entries from completed matrix
+                        off_diag = [reward_matrix[i][j] for j in range(n) if j != i]
+                    else:
+                        # Without MC: use only observed off-diagonal entries
+                        off_diag = [reward_matrix[i][j]
+                                    for j in range(n)
+                                    if j != i and mask[i][j] > 0]
+                    consensus = sum(off_diag) / len(off_diag) if off_diag else 0.0
+
+                    # Add rubric quality adjustment
+                    qa = quality_adjustments[indices[i]] if RUBRIC_QUALITY_CONFIG.enabled else 0.0
+                    rewards[indices[i]] = consensus + qa
 
             with progress_lock:
                 progress["q_done"] += 1

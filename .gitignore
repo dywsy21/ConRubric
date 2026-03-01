@@ -10,3 +10,4 @@ out/
 *.log
 docs
 .github
+.pytest_cache

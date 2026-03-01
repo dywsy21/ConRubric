@@ -7,8 +7,11 @@
 
 # ── GRM rubric‑generation instruction (used in SFT, RL, and inference) ───
 RUBRIC_GENERATION_PROMPT = (
-    "Please generate a comprehensive evaluation rubric for the following user question. "
-    "Output each criterion on a new line with signed points in the format: "
+    "Generate an evaluation rubric of 6–12 criteria for the following question. "
+    "Include BOTH positive criteria (what the answer should do) AND negative criteria "
+    "(common mistakes or harmful behaviors to penalize). Do not repeat or paraphrase "
+    "the same idea across multiple criteria.\n\n"
+    "Output each criterion on its own line in this format:\n"
     "- [+/-points] criterion | tags: ...\n\n"
     "Question:\n{question}"
 )
