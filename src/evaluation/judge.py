@@ -98,7 +98,8 @@ class Judge:
         
         return result
     
-    def _call_with_retry(self, prompt: str, temperature: float, max_retries: int = MAX_RETRIES) -> str:
+    def _call_with_retry(self, prompt: str, temperature: float, max_retries: int = MAX_RETRIES,
+                         extra_body: dict = None, max_tokens: int = None) -> str:
         """Call API with exponential backoff on timeout."""
         current_timeout = self.base_timeout
         last_error = None
@@ -110,11 +111,17 @@ class Judge:
                     print(f"Judge retry {attempt}/{max_retries} with timeout={current_timeout}s")
                     self._init_client(current_timeout)
                 
-                response = self.client.chat.completions.create(
+                kwargs = dict(
                     model=self.model_name,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=temperature,
                 )
+                if max_tokens is not None:
+                    kwargs["max_tokens"] = max_tokens
+                if extra_body is not None:
+                    kwargs["extra_body"] = extra_body
+                
+                response = self.client.chat.completions.create(**kwargs)
                 return response.choices[0].message.content
             except (httpx.TimeoutException, httpx.ReadTimeout, Exception) as e:
                 last_error = e
@@ -228,7 +235,8 @@ class Judge:
     def evaluate_answer(self, question: str, answer: str, rubric: str = None, max_retries: int = 3) -> float:
         """
         Evaluates an answer and returns a scalar score (0-10).
-        Retries on parsing errors.
+        Uses vLLM guided_choice + disable thinking for near-zero parse failures.
+        Falls back to regex parsing for non-vLLM backends.
         """
         if not rubric or not rubric.strip():
             print("Warning: empty rubric passed to evaluate_answer, returning 0.0")
@@ -238,14 +246,31 @@ class Judge:
         
         cache_key = _get_cache_key(self.model_name, prompt)
         
+        # vLLM guided output: disable thinking + constrain to 0-10 integer
+        guided_extra = {
+            "chat_template_kwargs": {"enable_thinking": False},
+            "guided_choice": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
+        }
+        
         for attempt in range(max_retries):
-            # On retry, skip cache to get fresh response
             use_cache = (attempt == 0)
-            response_text = self._call_api(prompt, temperature=0.0, use_cache=use_cache)
+            
+            # First attempt: try guided output (vLLM)
+            # Later attempts: fall back to unguided if guided fails
+            extra = guided_extra if attempt == 0 else {"chat_template_kwargs": {"enable_thinking": False}}
+            max_tok = 8 if attempt == 0 else 256
+            
+            try:
+                response_text = self._call_api_direct(
+                    prompt, temperature=0.0, use_cache=use_cache,
+                    extra_body=extra, max_tokens=max_tok,
+                )
+            except Exception:
+                # guided_choice not supported — fall back to plain call
+                response_text = self._call_api(prompt, temperature=0.0, use_cache=use_cache)
             
             score = self._parse_evaluation_response(response_text)
             if score is not None:
-                # Valid response - update cache with good response
                 if attempt > 0:
                     _save_to_cache(cache_key, response_text, "judge")
                 return score
@@ -255,9 +280,37 @@ class Judge:
         
         print("All evaluation retries failed, returning 0.0")
         return 0.0
+
+    def _call_api_direct(self, prompt: str, temperature: float = 0.0,
+                         use_cache: bool = True, extra_body: dict = None,
+                         max_tokens: int = None) -> str:
+        """Call API with extra_body support (for vLLM guided decoding)."""
+        cache_key = None
+        if use_cache and temperature == 0.0:
+            cache_key = _get_cache_key(self.model_name, prompt)
+            cached_response = _load_from_cache(cache_key, "judge")
+            if cached_response is not None:
+                return cached_response
+
+        result = self._call_with_retry(
+            prompt, temperature, extra_body=extra_body, max_tokens=max_tokens,
+        )
+
+        if cache_key and result:
+            _save_to_cache(cache_key, result, "judge")
+
+        return result
     
     def _parse_evaluation_response(self, response_text: str) -> Optional[float]:
-        """Parse evaluation response and return score, or None if parsing fails."""
+        """Parse evaluation response and return score, or None if parsing fails.
+        
+        Handles multiple formats (in priority order):
+        1. Bare integer from guided_choice: "7"
+        2. "Score: N" pattern
+        3. JSON {"score": N}
+        4. "N/10" pattern
+        5. Last bare integer 0-10
+        """
         if not response_text:
             return None
             
@@ -265,12 +318,21 @@ class Judge:
             # Strip <think>...</think> blocks (Qwen3-style chain-of-thought)
             cleaned = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
             if not cleaned:
-                cleaned = response_text  # fallback if stripping removed everything
+                cleaned = response_text.strip()
 
-            # Attempt to find the FIRST complete JSON object
+            # 1. Bare integer (from guided_choice)
+            if cleaned in ("0","1","2","3","4","5","6","7","8","9","10"):
+                return float(cleaned)
+
+            # 2. "Score: N" pattern (take LAST match — model may discuss scores before final)
+            score_matches = re.findall(r'[Ss]core\s*[:=]\s*(\d+(?:\.\d+)?)', cleaned)
+            if score_matches:
+                val = float(score_matches[-1])
+                return max(0.0, min(10.0, val))
+
+            # 3. JSON {"score": N} or {"overall": N}
             start = cleaned.find('{')
             if start != -1:
-                # Find the matching closing brace for the first object
                 depth = 0
                 end = start
                 for i in range(start, len(cleaned)):
@@ -281,42 +343,31 @@ class Judge:
                         if depth == 0:
                             end = i + 1
                             break
-
                 json_str = cleaned[start:end]
-                
-                # Fix common JSON escape issues
-                # Fix invalid escapes like \_ \* etc by escaping the backslash
                 json_str = re.sub(r'\\([^"\\/bfnrtu])', r'\\\\\1', json_str)
-                
                 try:
                     result = json.loads(json_str)
-                except json.JSONDecodeError:
-                    # Try with strict=False for more lenient parsing
-                    try:
-                        result = json.loads(json_str, strict=False)
-                    except json.JSONDecodeError as e:
-                        print(f"Error parsing evaluation: {e}")
-                        return None
-                
-                # Handle both formats
-                if "score" in result:
-                    return float(result["score"])
-                elif "overall" in result:
-                    return float(result["overall"])
-                else:
-                    print("No score found in JSON")
-                    return None
-            else:
-                # Try to extract score using regex as fallback
-                score_match = re.search(r'"?(?:score|overall)"?\s*[:=]\s*(\d+(?:\.\d+)?)', cleaned, re.IGNORECASE)
-                if score_match:
-                    return float(score_match.group(1))
-                # Also try bare number after common patterns
-                score_match = re.search(r'\b(\d+(?:\.\d+)?)\s*/\s*10\b', cleaned)
-                if score_match:
-                    return float(score_match.group(1))
-                print("Could not find JSON in evaluation response")
-                return None
+                    if "score" in result:
+                        return max(0.0, min(10.0, float(result["score"])))
+                    elif "overall" in result:
+                        return max(0.0, min(10.0, float(result["overall"])))
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+
+            # 4. "N/10" pattern
+            slash_match = re.search(r'(\d+(?:\.\d+)?)\s*/\s*10', cleaned)
+            if slash_match:
+                return max(0.0, min(10.0, float(slash_match.group(1))))
+
+            # 5. Last bare integer 0-10 in text
+            bare_matches = re.findall(r'\b(\d+)\b', cleaned)
+            for candidate in reversed(bare_matches):
+                val = int(candidate)
+                if 0 <= val <= 10:
+                    return float(val)
+
+            print("Could not extract score from evaluation response")
+            return None
         except Exception as e:
             print(f"Error parsing evaluation: {e}")
             return None
@@ -414,8 +465,29 @@ Respond with only "YES" or "NO".
             n=n, question=question, rubric=rubric, answers_block=answers_block,
         )
 
+        # vLLM guided JSON: array of n integers 0-10
+        guided_extra = {
+            "chat_template_kwargs": {"enable_thinking": False},
+            "guided_json": {
+                "type": "array",
+                "items": {"type": "integer", "minimum": 0, "maximum": 10},
+                "minItems": n,
+                "maxItems": n,
+            },
+        }
+
         for attempt in range(max_retries):
-            response_text = self._call_api(prompt, temperature=0.0, use_cache=(attempt == 0))
+            extra = guided_extra if attempt == 0 else {"chat_template_kwargs": {"enable_thinking": False}}
+            max_tok = 4 * n + 16 if attempt == 0 else 256
+            
+            try:
+                response_text = self._call_api_direct(
+                    prompt, temperature=0.0, use_cache=(attempt == 0),
+                    extra_body=extra, max_tokens=max_tok,
+                )
+            except Exception:
+                response_text = self._call_api(prompt, temperature=0.0, use_cache=(attempt == 0))
+            
             scores = self._parse_batch_scores(response_text, n)
             if scores is not None:
                 return scores
@@ -432,11 +504,18 @@ Respond with only "YES" or "NO".
             return None
         try:
             cleaned = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
+            if not cleaned:
+                cleaned = response_text.strip()
             cleaned = re.sub(r"```(?:json)?\s*", "", cleaned).strip()
 
             start = cleaned.find('[')
             end = cleaned.rfind(']') + 1
             if start == -1 or end <= start:
+                # Fallback: try to find N integers in the text
+                nums = re.findall(r'\b(\d+)\b', cleaned)
+                valid = [int(x) for x in nums if 0 <= int(x) <= 10]
+                if len(valid) == expected_n:
+                    return [float(v) for v in valid]
                 return None
 
             arr = json.loads(cleaned[start:end])

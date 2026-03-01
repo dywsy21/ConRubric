@@ -65,7 +65,7 @@ Return JSON array only. Do not include markdown fences.
 """
 
 DYNAMIC_RUBRIC_EVALUATION_PROMPT = """
-You are an expert judge. Evaluate the following Answer to the Question based strictly on the provided Rubric.
+Evaluate the Answer to the Question using the Rubric. Score 0-10.
 
 Question:
 {question}
@@ -76,10 +76,8 @@ Answer:
 Rubric:
 {rubric}
 
-Score from 0 to 10 (0 = complete failure, 10 = perfect adherence).
-Respond with ONLY the JSON object, no explanation.
-
-Output: {{"score": <integer>}}
+End your response with exactly: Score: N
+Where N is an integer from 0 to 10.
 """
 
 # ── Oracle: batch-evaluate multiple answers against ONE rubric ────────────
@@ -87,9 +85,7 @@ Output: {{"score": <integer>}}
 # lets the judge calibrate scores against each other, making the ranking signal
 # much more meaningful than scoring each answer in isolation.
 BATCH_RUBRIC_EVALUATION_PROMPT = """
-You are an expert judge. You will evaluate {n} answers to the same question using the same rubric.
-Score each answer from 0 to 10 (0 = complete failure, 10 = perfect adherence).
-IMPORTANT: Compare the answers against each other to produce well-calibrated relative scores.
+Rate {n} answers 0-10 using the rubric. Compare them for calibration.
 
 Question:
 {question}
@@ -99,10 +95,7 @@ Rubric:
 
 {answers_block}
 
-Respond with ONLY a JSON array of {n} integers, one score per answer in order.
-Example for 3 answers: [8, 3, 6]
-
-Output:
+Reply with a JSON array of {n} integers, e.g. [8, 3, 6]
 """
 
 
