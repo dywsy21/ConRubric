@@ -271,9 +271,14 @@ class SFTTrainer:
 
         # With StatefulDataLoader, we don't need to manually calculate epochs and steps
         # The dataloader will automatically resume from where it left off
+        # UNLESS resume_mode is "metadata_only" (elastic world-size change) —
+        # in that case the dataloader state was NOT restored and it starts from
+        # the beginning of the epoch. We track this so tqdm initial is correct.
+        _dataloader_state_restored = self.ckpt_handler.resume_mode != "metadata_only"
         if global_step > 0:
             log_with_rank(
-                f"StatefulDataLoader will automatically resume from global step: {global_step}",
+                f"StatefulDataLoader will automatically resume from global step: {global_step}"
+                f" (dataloader state {'restored' if _dataloader_state_restored else 'NOT restored — metadata_only mode'})",
                 logger=logger,
                 rank=0,
                 log_only_rank_0=True,
@@ -302,7 +307,7 @@ class SFTTrainer:
             for step_in_epoch, data in enumerate(
                 tqdm(
                     self.train_dataloader,
-                    initial=global_step % self.steps_per_epoch if epoch == start_epoch else 0,
+                    initial=global_step % self.steps_per_epoch if epoch == start_epoch and _dataloader_state_restored else 0,
                     total=self.steps_per_epoch,
                     desc=f"Epoch {epoch + 1}/{self.config.trainer.total_epochs}",
                     disable=not is_logging,
