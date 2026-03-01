@@ -117,16 +117,23 @@ def run_reward_bench(grm: RubricGenerator, judge: Judge, num_samples: int = None
             })
         pending_pairs = []
 
-    for row in tqdm(dataset, desc="RewardBench"):
-        prompt = row['prompt']
-        rubric = grm.generate_rubric(prompt)
-        pending_pairs.append({
-            "prompt": prompt,
+    # Collect all items first, then batch-generate rubrics for GPU parallelism
+    all_items = []
+    for row in dataset:
+        all_items.append({
+            "prompt": row['prompt'],
             "chosen": row['chosen'],
             "rejected": row['rejected'],
-            "rubric": rubric,
             "subset": row.get('subset', 'unknown'),
         })
+
+    all_questions = [item["prompt"] for item in all_items]
+    print(f"Batch-generating {len(all_questions)} rubrics...")
+    all_rubrics = grm.generate_batch(all_questions)
+
+    for item, rubric in tqdm(zip(all_items, all_rubrics), total=len(all_items), desc="RewardBench"):
+        item["rubric"] = rubric
+        pending_pairs.append(item)
         if len(pending_pairs) >= eval_batch_size:
             flush_pending()
 
@@ -195,26 +202,28 @@ def run_ppe_benchmark(grm: RubricGenerator, judge: Judge, num_samples: int = Non
             })
         pending_pairs = []
 
-    for row in tqdm(dataset, desc="PPE"):
-        prompt = row['prompt']
-        response_1 = row['response_1']
-        response_2 = row['response_2']
+    # Collect all items first, then batch-generate rubrics
+    all_items = []
+    for row in dataset:
         winner = row['winner']
-        
         if winner not in ['model_a', 'model_b']:
-            continue # Skip ties or errors for now
-            
-        chosen = response_1 if winner == 'model_a' else response_2
-        rejected = response_2 if winner == 'model_a' else response_1
-        
-        rubric = grm.generate_rubric(prompt)
-        pending_pairs.append({
-            "prompt": prompt,
+            continue
+        chosen = row['response_1'] if winner == 'model_a' else row['response_2']
+        rejected = row['response_2'] if winner == 'model_a' else row['response_1']
+        all_items.append({
+            "prompt": row['prompt'],
             "chosen": chosen,
             "rejected": rejected,
-            "rubric": rubric,
             "winner": winner,
         })
+
+    all_questions = [item["prompt"] for item in all_items]
+    print(f"Batch-generating {len(all_questions)} rubrics...")
+    all_rubrics = grm.generate_batch(all_questions)
+
+    for item, rubric in tqdm(zip(all_items, all_rubrics), total=len(all_items), desc="PPE"):
+        item["rubric"] = rubric
+        pending_pairs.append(item)
         if len(pending_pairs) >= eval_batch_size:
             flush_pending()
 
@@ -285,41 +294,40 @@ def run_rmb_benchmark(grm: RubricGenerator, judge: Judge, num_samples: int = Non
             })
         pending_pairs = []
 
-    for row in tqdm(dataset, desc="RMB"):
-        # Extract prompt from conversation
+    # Collect all items first, then batch-generate rubrics
+    all_items = []
+    for row in dataset:
         conversation = row['conversation']
-        # Assuming the last user message is the prompt, or we concatenate.
-        # For simplicity, let's take the last user message content.
         prompt = ""
         for msg in reversed(conversation):
             if msg['role'] == 'user':
                 prompt = msg['content']
                 break
-        
         if not prompt:
             continue
-            
         responses = row['responses']
         preferred_index = row['preferred_index']
-        
         if preferred_index not in [0, 1]:
             continue
-            
         chosen = responses[preferred_index]['answer']
         rejected = responses[1 - preferred_index]['answer']
-        
         category = row.get('category_path', 'unknown')
-        
-        rubric = grm.generate_rubric(prompt)
         subset = category.split('/')[1] if '/' in category else category
-        pending_pairs.append({
+        all_items.append({
             "prompt": prompt,
             "chosen": chosen,
             "rejected": rejected,
-            "rubric": rubric,
             "category": category,
             "subset": subset,
         })
+
+    all_questions = [item["prompt"] for item in all_items]
+    print(f"Batch-generating {len(all_questions)} rubrics...")
+    all_rubrics = grm.generate_batch(all_questions)
+
+    for item, rubric in tqdm(zip(all_items, all_rubrics), total=len(all_items), desc="RMB"):
+        item["rubric"] = rubric
+        pending_pairs.append(item)
         if len(pending_pairs) >= eval_batch_size:
             flush_pending()
 
