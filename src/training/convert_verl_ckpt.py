@@ -96,7 +96,87 @@ def _load_and_merge_shards(step_dir: Path) -> dict:
     return merged
 
 
-def convert(step_dir: str | Path, *, force: bool = False) -> Path:
+def _is_lora_state_dict(state_dict: dict) -> bool:
+    """Check if a state dict contains LoRA adapter keys."""
+    return any("lora_A" in k or "lora_B" in k for k in state_dict)
+
+
+def _strip_peft_prefix(state_dict: dict) -> dict:
+    """Remove the 'base_model.model.' prefix that PEFT adds to all keys."""
+    prefix = "base_model.model."
+    new_sd = {}
+    for k, v in state_dict.items():
+        if k.startswith(prefix):
+            new_sd[k[len(prefix):]] = v
+        else:
+            new_sd[k] = v
+    return new_sd
+
+
+def _separate_base_and_lora(state_dict: dict) -> tuple[dict, dict]:
+    """Separate a PEFT state dict into base model weights and LoRA adapter weights.
+
+    After stripping the 'base_model.model.' prefix, LoRA keys look like:
+      model.layers.0.self_attn.q_proj.lora_A.default.weight
+      model.layers.0.self_attn.q_proj.lora_B.default.weight
+    Base keys look like:
+      model.layers.0.self_attn.q_proj.base_layer.weight
+    """
+    stripped = _strip_peft_prefix(state_dict)
+    base_sd = {}
+    lora_sd = {}
+    for k, v in stripped.items():
+        if "lora_A" in k or "lora_B" in k:
+            lora_sd[k] = v
+        elif ".base_layer." in k:
+            # PEFT wraps original params under .base_layer — unwrap for base model
+            clean_key = k.replace(".base_layer.", ".")
+            base_sd[clean_key] = v
+        else:
+            base_sd[k] = v
+    return base_sd, lora_sd
+
+
+def _merge_lora_into_base(base_sd: dict, lora_sd: dict, lora_alpha: int = 64, lora_rank: int = 32) -> dict:
+    """Manually merge LoRA weights: W' = W + (alpha/r) * B @ A."""
+    import re
+    scaling = lora_alpha / lora_rank
+
+    # Group LoRA A/B pairs by module path
+    # Keys like: model.layers.0.self_attn.q_proj.lora_A.default.weight
+    lora_pairs: dict[str, dict] = {}
+    for k, v in lora_sd.items():
+        # Extract the module path (e.g., model.layers.0.self_attn.q_proj)
+        match = re.match(r"(.+)\.(lora_[AB])\.default\.weight", k)
+        if match:
+            module_path = match.group(1)
+            ab = match.group(2)  # "lora_A" or "lora_B"
+            if module_path not in lora_pairs:
+                lora_pairs[module_path] = {}
+            lora_pairs[module_path][ab] = v
+
+    merged_sd = dict(base_sd)
+    for module_path, pair in lora_pairs.items():
+        if "lora_A" not in pair or "lora_B" not in pair:
+            print(f"[convert] WARNING: Incomplete LoRA pair for {module_path}, skipping")
+            continue
+        weight_key = f"{module_path}.weight"
+        if weight_key not in merged_sd:
+            print(f"[convert] WARNING: Base weight {weight_key} not found, skipping")
+            continue
+
+        A = pair["lora_A"].float()  # (r, in_features)
+        B = pair["lora_B"].float()  # (out_features, r)
+        W = merged_sd[weight_key].float()
+        merged_sd[weight_key] = (W + scaling * (B @ A)).to(base_sd[weight_key].dtype)
+
+    n_merged = len(lora_pairs)
+    print(f"[convert] Merged {n_merged} LoRA adapter pairs (alpha={lora_alpha}, r={lora_rank}, scale={scaling})")
+    return merged_sd
+
+
+def convert(step_dir: str | Path, *, force: bool = False,
+            lora_rank: int = 0, lora_alpha: int = 0) -> Path:
     step_dir = Path(step_dir)
     hf_dir = step_dir / "huggingface"
 
@@ -114,6 +194,28 @@ def convert(step_dir: str | Path, *, force: bool = False) -> Path:
 
     print(f"[convert] Loading config from {hf_dir} …")
     config = AutoConfig.from_pretrained(hf_dir, trust_remote_code=True)
+
+    is_lora = _is_lora_state_dict(state_dict)
+
+    if is_lora:
+        print("[convert] Detected LoRA checkpoint — merging adapter into base model …")
+        # Auto-detect rank if not provided
+        if lora_rank <= 0:
+            for k, v in state_dict.items():
+                if "lora_A" in k and isinstance(v, torch.Tensor):
+                    lora_rank = v.shape[0]
+                    break
+            if lora_rank <= 0:
+                lora_rank = 32  # fallback default
+            print(f"[convert] Auto-detected LoRA rank = {lora_rank}")
+        if lora_alpha <= 0:
+            lora_alpha = lora_rank * 2  # common default
+            print(f"[convert] Using LoRA alpha = {lora_alpha}")
+
+        base_sd, lora_sd = _separate_base_and_lora(state_dict)
+        del state_dict
+        state_dict = _merge_lora_into_base(base_sd, lora_sd, lora_alpha, lora_rank)
+        del base_sd, lora_sd
 
     print("[convert] Instantiating model on CPU …")
     model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
@@ -134,8 +236,10 @@ def main():
     parser = argparse.ArgumentParser(description="Convert verl FSDP checkpoint → HF model")
     parser.add_argument("step_dir", help="Path to global_step_N directory")
     parser.add_argument("--force", action="store_true", help="Re-convert even if weights exist")
+    parser.add_argument("--lora-rank", type=int, default=0, help="LoRA rank (auto-detected if 0)")
+    parser.add_argument("--lora-alpha", type=int, default=0, help="LoRA alpha (defaults to 2×rank)")
     args = parser.parse_args()
-    convert(args.step_dir, force=args.force)
+    convert(args.step_dir, force=args.force, lora_rank=args.lora_rank, lora_alpha=args.lora_alpha)
 
 
 if __name__ == "__main__":

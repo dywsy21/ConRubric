@@ -61,6 +61,9 @@ SFT_TEST_FREQ="${SFT_TEST_FREQ:--1}"
 SFT_NO_HEALTHBENCH="${SFT_NO_HEALTHBENCH:-0}"
 SFT_NO_SYNTHETIC="${SFT_NO_SYNTHETIC:-0}"
 SFT_SYNTHETIC_PATH="${SFT_SYNTHETIC_PATH:-}"
+SFT_LORA_RANK="${SFT_LORA_RANK:-0}"
+SFT_LORA_ALPHA="${SFT_LORA_ALPHA:-64}"
+SFT_LORA_TARGET_MODULES="${SFT_LORA_TARGET_MODULES:-all-linear}"
 PRE_DIR="${PRE_DIR:-out/bench/base}"
 POST_DIR="${POST_DIR:-out/bench/sft}"
 COMPARISON_MD="${COMPARISON_MD:-out/bench/sft/rubric_comparison.md}"
@@ -265,6 +268,10 @@ if should_run "train"; then
       TRAIN_ARGS+=(--synthetic-path "$SFT_SYNTHETIC_PATH")
     else
       TRAIN_ARGS+=(--synthetic-limit "$LIMIT_PER_DATASET")
+    fi
+    # LoRA / PEFT
+    if [[ "$SFT_LORA_RANK" -gt 0 ]]; then
+      TRAIN_ARGS+=(--lora-rank "$SFT_LORA_RANK" --lora-alpha "$SFT_LORA_ALPHA" --lora-target-modules "$SFT_LORA_TARGET_MODULES")
     fi
     "$PYTHON_BIN" "${TRAIN_ARGS[@]}"
   else

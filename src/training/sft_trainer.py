@@ -363,6 +363,14 @@ def _launch_verl_sft(
         "engine.use_torch_compile=False",
     ]
 
+    # LoRA / PEFT configuration
+    if args.lora_rank > 0:
+        cmd.extend([
+            f"model.lora_rank={args.lora_rank}",
+            f"model.lora_alpha={args.lora_alpha}",
+            f"model.target_modules={args.lora_target_modules}",
+        ])
+
     print("Launching verl SFT:")
     print(" ".join(cmd))
     env = os.environ.copy()
@@ -409,6 +417,14 @@ def build_arg_parser():
     parser.add_argument("--healthbench-benchmark-ratio", type=float, default=0.2, help="Fraction of HealthBench prompts reserved for benchmark (excluded from SFT)")
     parser.add_argument("--healthbench-split-seed", type=int, default=42, help="Deterministic split seed for HealthBench SFT/benchmark")
     parser.add_argument("--rebuild-healthbench-split", action="store_true", help="Force rebuild HealthBench split files")
+
+    # LoRA / PEFT
+    parser.add_argument("--lora-rank", type=int, default=0,
+                        help="LoRA rank. 0 = full fine-tuning. Recommended: 32 or 64")
+    parser.add_argument("--lora-alpha", type=int, default=64,
+                        help="LoRA alpha scaling factor. Recommended: 2x rank")
+    parser.add_argument("--lora-target-modules", type=str, default="all-linear",
+                        help="Target modules for LoRA. 'all-linear' applies to all linear layers")
     return parser
 
 
