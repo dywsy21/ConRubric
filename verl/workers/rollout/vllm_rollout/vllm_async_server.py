@@ -314,7 +314,6 @@ class vLLMHttpServerBase:
             "max_num_batched_tokens": self.config.max_num_batched_tokens,
             "enable_prefix_caching": self.config.enable_prefix_caching,
             "enable_sleep_mode": self.config.enable_sleep_mode,
-            "logprobs_mode": self.config.logprobs_mode,
             "disable_custom_all_reduce": True,
             "enforce_eager": self.config.enforce_eager,
             "gpu_memory_utilization": self.config.gpu_memory_utilization,
@@ -326,6 +325,10 @@ class vLLMHttpServerBase:
             "hf_overrides": hf_overrides,
             **engine_kwargs,
         }
+
+        # logprobs_mode was added in vLLM ~0.9; skip for older versions
+        if _VLLM_VERSION >= version.parse("0.9.0"):
+            args["logprobs_mode"] = self.config.logprobs_mode
 
         if self.config.prometheus.enable:
             if self.config.prometheus.served_model_name:
