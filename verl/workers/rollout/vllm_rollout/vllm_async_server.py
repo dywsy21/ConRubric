@@ -71,7 +71,16 @@ if _VLLM_VERSION > version.parse("0.11.0"):
 
         get_encoding()
 else:
-    from vllm.utils import FlexibleArgumentParser, get_tcp_uri
+    from vllm.utils import FlexibleArgumentParser
+
+    try:
+        from vllm.utils import get_tcp_uri
+    except ImportError:
+        # vllm < 0.9 does not have get_tcp_uri; provide a local fallback
+        def get_tcp_uri(host: str, port: int) -> str:
+            if ":" in host:  # IPv6
+                return f"tcp://[{host}]:{port}"
+            return f"tcp://{host}:{port}"
 if _VLLM_VERSION >= version.parse("0.12.0"):
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.outputs import ModelRunnerOutput
