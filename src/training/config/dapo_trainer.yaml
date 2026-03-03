@@ -36,10 +36,13 @@ actor_rollout_ref:
     trust_remote_code: True
   actor:
     strategy: fsdp
+    fsdp_config:
+      optimizer_offload: true   # Offload Adam states to CPU (~32GB savings)
+      grad_offload: true        # Offload gradients to CPU (~8GB savings)
     rollout_n: ${actor_rollout_ref.rollout.n}
     ppo_mini_batch_size: 8
-    ppo_micro_batch_size_per_gpu: 2
-    ppo_max_token_len_per_gpu: 8192
+    ppo_micro_batch_size_per_gpu: 1   # Reduced from 2 to save activation memory
+    ppo_max_token_len_per_gpu: 4096   # Reduced from 8192 to save memory
     ppo_epochs: 1
     shuffle: False
     use_dynamic_bsz: False
@@ -67,9 +70,9 @@ actor_rollout_ref:
     do_sample: True
     prompt_length: ${data.max_prompt_length}
     response_length: ${data.max_response_length}
-    log_prob_micro_batch_size_per_gpu: 2
+    log_prob_micro_batch_size_per_gpu: 1
     dtype: bfloat16
-    gpu_memory_utilization: 0.5
+    gpu_memory_utilization: 0.4   # Reduced from 0.5 to leave more room for actor training
     max_model_len: 2048  # prompt(1024)+response(768)=1792; avoids 40K default
     tensor_model_parallel_size: 1
     max_num_batched_tokens: 8192
