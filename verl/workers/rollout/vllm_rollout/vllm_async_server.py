@@ -40,7 +40,10 @@ from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core import EngineCoreProc
-from vllm.v1.engine.utils import CoreEngineProcManager
+try:
+    from vllm.v1.engine.utils import CoreEngineProcManager
+except ImportError:
+    CoreEngineProcManager = None  # vLLM < 0.11; headless DP not available
 from vllm.v1.executor.abstract import Executor
 
 from verl.single_controller.ray import RayClassWithInitArgs
