@@ -176,12 +176,24 @@ def _merge_lora_into_base(base_sd: dict, lora_sd: dict, lora_alpha: int = 64, lo
 
 
 def convert(step_dir: str | Path, *, force: bool = False,
-            lora_rank: int = 0, lora_alpha: int = 0) -> Path:
+            lora_rank: int = 0, lora_alpha: int = 0,
+            output_dir: str | Path | None = None) -> Path:
     step_dir = Path(step_dir)
-    hf_dir = step_dir / "huggingface"
+    src_hf_dir = step_dir / "huggingface"
 
-    if not hf_dir.exists():
+    if not src_hf_dir.exists():
         raise FileNotFoundError(f"No huggingface/ subfolder in {step_dir}")
+
+    # Determine output directory
+    hf_dir = Path(output_dir) if output_dir else src_hf_dir
+    if hf_dir != src_hf_dir:
+        # Copy tokenizer/config from source huggingface/ to output dir
+        import shutil
+        hf_dir.mkdir(parents=True, exist_ok=True)
+        for f in src_hf_dir.iterdir():
+            if f.is_file() and not f.name.startswith("model") and not f.name.startswith("pytorch_model"):
+                shutil.copy2(f, hf_dir / f.name)
+        print(f"[convert] Output directory: {hf_dir}")
 
     # Already converted?
     weights = list(hf_dir.glob("model*.safetensors")) + list(hf_dir.glob("pytorch_model*.bin"))
@@ -192,8 +204,8 @@ def convert(step_dir: str | Path, *, force: bool = False,
     # Load and merge all FSDP shards
     state_dict = _load_and_merge_shards(step_dir)
 
-    print(f"[convert] Loading config from {hf_dir} …")
-    config = AutoConfig.from_pretrained(hf_dir, trust_remote_code=True)
+    print(f"[convert] Loading config from {src_hf_dir} …")
+    config = AutoConfig.from_pretrained(src_hf_dir, trust_remote_code=True)
 
     is_lora = _is_lora_state_dict(state_dict)
 
@@ -225,7 +237,7 @@ def convert(step_dir: str | Path, *, force: bool = False,
     model.save_pretrained(hf_dir, safe_serialization=True)
 
     # Also re-save tokenizer to be safe (already there, but ensures consistency)
-    tokenizer = AutoTokenizer.from_pretrained(hf_dir, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(src_hf_dir, trust_remote_code=True)
     tokenizer.save_pretrained(hf_dir)
 
     print("[convert] Done ✓")
@@ -238,8 +250,11 @@ def main():
     parser.add_argument("--force", action="store_true", help="Re-convert even if weights exist")
     parser.add_argument("--lora-rank", type=int, default=0, help="LoRA rank (auto-detected if 0)")
     parser.add_argument("--lora-alpha", type=int, default=0, help="LoRA alpha (defaults to 2×rank)")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Output directory for merged model (default: step_dir/huggingface/)")
     args = parser.parse_args()
-    convert(args.step_dir, force=args.force, lora_rank=args.lora_rank, lora_alpha=args.lora_alpha)
+    convert(args.step_dir, force=args.force, lora_rank=args.lora_rank,
+            lora_alpha=args.lora_alpha, output_dir=args.output_dir)
 
 
 if __name__ == "__main__":
