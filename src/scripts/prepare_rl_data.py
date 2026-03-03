@@ -81,7 +81,7 @@ def _load_synthetic(path: str, limit: int | None = None) -> list[dict]:
                 continue
             item = json.loads(line)
             question = (item.get("question") or "").strip()
-            rubric_list = item.get("rubric", [])
+            rubric_list = item.get("rubrics") or item.get("rubric", [])
             if not question or not rubric_list:
                 continue
             rows.append(
