@@ -433,8 +433,9 @@ class vLLMHttpServerBase:
 
         engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
 
-        # Don't keep the dummy data in memory
-        await engine_client.reset_mm_cache()
+        # Don't keep the dummy data in memory (method added in vLLM >0.8.5)
+        if hasattr(engine_client, 'reset_mm_cache'):
+            await engine_client.reset_mm_cache()
 
         app = build_app(args)
         if _VLLM_VERSION > version.parse("0.11.0"):
