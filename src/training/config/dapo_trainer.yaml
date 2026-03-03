@@ -9,8 +9,8 @@ defaults:
   - _self_
 
 data:
-  train_files: ['data/rl_train.parquet']
-  val_files: ['data/rl_train.parquet']
+  train_files: ['data/rl_train_filtered.parquet']   # Pre-filtered by scripts/prefilter_rl_data.py
+  val_files: ['data/rl_train_filtered.parquet']
   prompt_key: prompt
   reward_fn_key: data_source
   max_prompt_length: 1024
@@ -18,7 +18,7 @@ data:
   train_batch_size: 8
   gen_batch_size: ${data.train_batch_size}
   shuffle: True
-  filter_overlong_prompts: True
+  filter_overlong_prompts: False   # Already pre-filtered, skip 10-min runtime filter
   filter_overlong_prompts_workers: 1
   dataloader_num_workers: 0
   truncation: left
