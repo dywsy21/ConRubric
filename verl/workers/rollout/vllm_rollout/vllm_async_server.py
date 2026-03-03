@@ -590,7 +590,8 @@ class vLLMHttpServerBase:
             await self.engine.reset_prefix_cache()
 
     async def wait_for_requests_to_drain(self):
-        await self.engine.wait_for_requests_to_drain()
+        if hasattr(self.engine, 'wait_for_requests_to_drain'):
+            await self.engine.wait_for_requests_to_drain()
 
     async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort all ongoing generation requests.
