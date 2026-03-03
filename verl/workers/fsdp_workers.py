@@ -628,6 +628,23 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 print(f"[DEBUG] FSDP param device AFTER offload: {name[:50]}... -> {param.device}")
                 break
             print(f"[DEBUG] GPU mem AFTER offload+empty_cache: alloc={torch.cuda.memory_allocated()/1e9:.2f}GB, reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
+            
+            # Enumerate ALL GPU tensors
+            import sys
+            gpu_tensors = []
+            for obj in gc.get_objects():
+                try:
+                    if torch.is_tensor(obj) and obj.is_cuda:
+                        gpu_tensors.append((obj.shape, obj.dtype, obj.numel() * obj.element_size()))
+                except:
+                    pass
+            gpu_tensors.sort(key=lambda x: -x[2])
+            print(f"[DEBUG] Found {len(gpu_tensors)} GPU tensors:")
+            total_gpu_tensor_bytes = sum(t[2] for t in gpu_tensors)
+            print(f"[DEBUG] Total GPU tensor memory: {total_gpu_tensor_bytes/1e9:.2f}GB")
+            for shape, dtype, size_bytes in gpu_tensors[:20]:
+                print(f"[DEBUG]   {shape} {dtype} = {size_bytes/1e6:.1f}MB")
+            
             log_gpu_memory_usage("Before building rollout (after actor offload)", logger=logger)
 
         # 1. parse rollout and huggingface model config
