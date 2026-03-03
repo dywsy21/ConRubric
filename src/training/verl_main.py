@@ -73,15 +73,21 @@ def main_elastic():
         min_devices=int(os.getenv("RL_MIN_DEVICES", "2")),
         max_devices=int(os.getenv("RL_MAX_DEVICES", "8")),
         check_interval=float(os.getenv("ELASTIC_CHECK_INTERVAL", "60")),
+        memory_threshold_pct=float(os.getenv("ELASTIC_MEMORY_THRESHOLD_PCT", "5")),
+        power_threshold_w=float(os.getenv("ELASTIC_POWER_THRESHOLD_W", "100")),
         verbose=True,
     )
     sys.exit(rc)
 
 
 if __name__ == "__main__":
-    if os.getenv("_ELASTIC_CHILD") == "1" or os.getenv("ELASTIC_TRAINING", "1") == "0":
+    _child = os.getenv("_ELASTIC_CHILD")
+    _elastic = os.getenv("ELASTIC_TRAINING", "1")
+    print(f"[verl_main] _ELASTIC_CHILD={_child!r}, ELASTIC_TRAINING={_elastic!r}", flush=True)
+    if _child == "1" or _elastic == "0":
         # Child process — run training directly via Hydra.
         main()
     else:
         # Parent process — elastic GPU scaling wrapper.
+        print("[verl_main] Entering elastic GPU scaling wrapper", flush=True)
         main_elastic()
