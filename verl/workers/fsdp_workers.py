@@ -605,6 +605,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def _build_rollout(self, trust_remote_code=False):
         from torch.distributed.device_mesh import init_device_mesh
 
+        # Force-free GPU memory before vLLM init (critical for shared GPU scenarios)
+        if self._is_actor and hasattr(self, 'actor_module_fsdp'):
+            if self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+                logger.info("Force-offloaded actor model to CPU before rollout init")
+            import torch
+            torch.cuda.empty_cache()
+            log_gpu_memory_usage("Before building rollout (after actor offload)", logger=logger)
+
         # 1. parse rollout and huggingface model config
         rollout_config: RolloutConfig = omega_conf_to_dataclass(self.config.rollout)
         model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model, dataclass_type=HFModelConfig)
