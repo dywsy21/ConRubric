@@ -80,6 +80,9 @@ actor_rollout_ref:
     max_num_seqs: 64
     enforce_eager: True
     free_cache_engine: True
+    engine_kwargs:
+      vllm:
+        num_gpu_blocks_override: 500
     val_kwargs:
       top_k: -1
       top_p: 1.0
