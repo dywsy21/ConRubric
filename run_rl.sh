@@ -151,7 +151,7 @@ if should_run "bench"; then
     echo "[INFO] Using RL model: $RL_MODEL"
 
     PYTHON_BIN="${PYTHON_BIN:-python}"
-    BENCHMARKS="${BENCHMARKS:-rewardbench ppe rmb healthbench_rubric}"
+    BENCHMARKS="${BENCHMARKS:-healthbench_rubric}"
     BENCH_NUM_SAMPLES="${BENCH_NUM_SAMPLES:-120}"
     EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-24}"
     EVAL_WORKERS="${EVAL_WORKERS:-6}"
