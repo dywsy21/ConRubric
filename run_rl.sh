@@ -133,6 +133,11 @@ function resolve_rl_model() {
 # ═══════════════════════════════════════════════════════════════════
 if should_run "train"; then
   echo "\n[STEP] RL Training (${RL_ALGORITHM:-dapo})"
+  # Clear _ELASTIC_CHILD to ensure the elastic wrapper runs (not the child path).
+  # This var may leak from a previous crashed elastic run.
+  unset _ELASTIC_CHILD
+  # Do NOT set CUDA_VISIBLE_DEVICES — the elastic wrapper selects GPUs automatically.
+  unset CUDA_VISIBLE_DEVICES
   python -u -m src.training.verl_main \
     "${HYDRA_ARGS[@]}" \
     "${PASSTHROUGH_ARGS[@]}" \
