@@ -72,7 +72,7 @@ actor_rollout_ref:
     response_length: ${data.max_response_length}
     log_prob_micro_batch_size_per_gpu: 1
     dtype: bfloat16
-    gpu_memory_utilization: 0.4   # Reduced from 0.5 to leave more room for actor training
+    gpu_memory_utilization: 0.9   # High because free_cache_engine releases vLLM memory during training; must exceed (used_by_others + model_weights) / total_gpu to avoid negative KV cache budget
     max_model_len: 2048  # prompt(1024)+response(768)=1792; avoids 40K default
     tensor_model_parallel_size: 1
     max_num_batched_tokens: 8192
