@@ -1,4 +1,4 @@
-#!/usr/bin/env zsh
+#!/usr/bin/env bash
 set -euo pipefail
 
 # ═══════════════════════════════════════════════════════════════════
@@ -160,7 +160,7 @@ if should_run "bench"; then
 
     "$PYTHON_BIN" -m src.evaluation.run_benchmark \
       --model_path "$RL_MODEL" \
-      --benchmarks ${(z)BENCHMARKS} \
+      --benchmarks $BENCHMARKS \
       --num_samples "$BENCH_NUM_SAMPLES" \
       --eval_batch_size "$EVAL_BATCH_SIZE" \
       --eval_workers "$EVAL_WORKERS" \
