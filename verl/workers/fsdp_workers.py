@@ -604,14 +604,30 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     def _build_rollout(self, trust_remote_code=False):
         from torch.distributed.device_mesh import init_device_mesh
+        import gc
 
         # Force-free GPU memory before vLLM init (critical for shared GPU scenarios)
         if self._is_actor and hasattr(self, 'actor_module_fsdp'):
+            # Debug: check FSDP model device before offload
+            print(f"[DEBUG] _build_rollout: _is_offload_param={self._is_offload_param}")
+            for name, param in self.actor_module_fsdp.named_parameters():
+                print(f"[DEBUG] FSDP param device BEFORE offload: {name[:50]}... -> {param.device}")
+                break  # just check first param
+            print(f"[DEBUG] GPU mem BEFORE offload: alloc={torch.cuda.memory_allocated()/1e9:.2f}GB, reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
+
             if self._is_offload_param:
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-                logger.info("Force-offloaded actor model to CPU before rollout init")
-            import torch
+                print("[DEBUG] Force-offloaded actor model to CPU before rollout init")
+            
+            # Also try explicit gc + empty_cache
+            gc.collect()
             torch.cuda.empty_cache()
+            
+            # Debug: check after offload
+            for name, param in self.actor_module_fsdp.named_parameters():
+                print(f"[DEBUG] FSDP param device AFTER offload: {name[:50]}... -> {param.device}")
+                break
+            print(f"[DEBUG] GPU mem AFTER offload+empty_cache: alloc={torch.cuda.memory_allocated()/1e9:.2f}GB, reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
             log_gpu_memory_usage("Before building rollout (after actor offload)", logger=logger)
 
         # 1. parse rollout and huggingface model config
