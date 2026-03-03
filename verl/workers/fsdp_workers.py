@@ -821,10 +821,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     async def trainer_mode(self):
         """Context switch hybridengine to trainer mode."""
+        print(f"[DEBUG] trainer_mode: GPU mem before release: alloc={torch.cuda.memory_allocated()/1e9:.2f}GB, reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
         if self.config.rollout.free_cache_engine:
             log_gpu_memory_usage("Before rollout offload", logger=logger)
             await self.rollout.release()
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
             log_gpu_memory_usage("After rollout offload", logger=logger)
+            print(f"[DEBUG] trainer_mode: GPU mem after release+empty_cache: alloc={torch.cuda.memory_allocated()/1e9:.2f}GB, reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
 
         self.actor_module_fsdp.train()
 
@@ -1064,6 +1069,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # when is_lora is True, we use the actor without lora applied to calculate the log_prob
         # which is mostly used for ref log_prob calculation
         assert self._is_actor
+        print(f"[DEBUG] compute_log_prob: GPU mem before load_fsdp: alloc={torch.cuda.memory_allocated()/1e9:.2f}GB, reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
