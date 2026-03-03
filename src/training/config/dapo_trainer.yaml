@@ -73,7 +73,7 @@ actor_rollout_ref:
     response_length: ${data.max_response_length}
     log_prob_micro_batch_size_per_gpu: 1
     dtype: bfloat16
-    gpu_memory_utilization: 0.95  # Must be high: vLLM formula is total*util - peak_alloc (incl. FSDP actor + other users)
+    gpu_memory_utilization: 0.5   # Low for safe init (co-located with FSDP actor + other users); runtime KV cache size controlled by num_gpu_blocks_override
     max_model_len: 1792  # prompt(1024)+response(768)=1792; exact fit
     tensor_model_parallel_size: 1
     max_num_batched_tokens: 4096
