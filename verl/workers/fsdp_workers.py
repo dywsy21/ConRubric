@@ -773,6 +773,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
         log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
+        # Move params to CPU to free GPU memory for vLLM wake_up.
+        # Without this, the state_dict tensors (~8 GB) overlap with CuMem re-mapping (~8 GB),
+        # causing OOM on GPUs with limited free memory (co-located FSDP + vLLM).
+        if isinstance(params, dict):
+            params = {k: v.cpu() if torch.is_tensor(v) else v for k, v in params.items()}
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        print(f"[DEBUG] rollout_mode: GPU mem after params→CPU: alloc={torch.cuda.memory_allocated()/1e9:.2f}GB")
+
         set_expandable_segments(False)
 
         if peft_config is not None and self.base_sync_done:
@@ -780,7 +790,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         else:
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
             per_tensor_param = (
-                (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
+                (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param.to(device, non_blocking=True) if torch.is_tensor(param) else param)
                 for name, param in params.items()
             )
 
