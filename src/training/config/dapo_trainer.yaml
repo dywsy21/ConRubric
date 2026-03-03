@@ -37,6 +37,7 @@ actor_rollout_ref:
   actor:
     strategy: fsdp
     fsdp_config:
+      param_offload: true       # Offload actor weights to CPU during init → frees GPU before vLLM starts
       optimizer_offload: true   # Offload Adam states to CPU (~32GB savings)
       grad_offload: true        # Offload gradients to CPU (~8GB savings)
     rollout_n: ${actor_rollout_ref.rollout.n}
