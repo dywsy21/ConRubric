@@ -1,18 +1,25 @@
 """Prepare RL training data (verl-compatible parquet).
 
-Merges two sources — synthetic rubrics and HealthBench SFT split — into a
-single parquet file that verl's RL dataset loader can consume.
+Merges multiple sources — RubricHub, synthetic rubrics, and HealthBench SFT
+split — into a single parquet file that verl's RL dataset loader can consume.
 
 The HealthBench *benchmark* split (20 %) is excluded to avoid evaluation leakage.
 
+When ``--uniform-mix`` is enabled the smaller source is **upsampled** (with
+repetition) so that both contribute equally many rows.  The final dataframe
+is shuffled so that sources are interleaved ("round-robin-ish").
+
 Usage:
     python -m src.scripts.prepare_rl_data [--synthetic-limit N] [--healthbench-limit N]
+    python -m src.scripts.prepare_rl_data --rubrichub-path data/rubrichub_sft.jsonl --uniform-mix
 """
 
 import argparse
 import json
+import math
 import os
 
+import numpy as np
 import pandas as pd
 
 from src.data.prepare_healthbench import ensure_healthbench_splits
@@ -132,22 +139,94 @@ def _load_healthbench(limit: int | None = None) -> list[dict]:
     return rows
 
 
+def _load_rubrichub(path: str, limit: int | None = None) -> list[dict]:
+    """Load RubricHub SFT JSONL (already converted by prepare_rubrichub.py)."""
+    if not os.path.exists(path):
+        print(f"[prepare_rl_data] RubricHub file not found: {path}")
+        return []
+
+    rows: list[dict] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            question = (item.get("question") or "").strip()
+            rubric_list = item.get("rubrics") or item.get("rubric", [])
+            if not question or not rubric_list:
+                continue
+            rows.append(
+                _make_row(
+                    question=question,
+                    rubric_items=rubric_list,
+                    source=item.get("source", "rubrichub"),
+                    gold_answer=item.get("gold_answer", ""),
+                )
+            )
+            if limit is not None and len(rows) >= limit:
+                break
+
+    print(f"[prepare_rl_data] Loaded {len(rows)} RubricHub rows from {path}")
+    return rows
+
+
 # ── main ──────────────────────────────────────────────────────────────────
+def _upsample(rows: list[dict], target_size: int, rng: np.random.Generator) -> list[dict]:
+    """Upsample *rows* to *target_size* by repeating + random sampling the remainder."""
+    if len(rows) >= target_size:
+        return rows[:target_size]
+    full_copies = target_size // len(rows)
+    remainder = target_size % len(rows)
+    result = rows * full_copies
+    if remainder > 0:
+        indices = rng.choice(len(rows), size=remainder, replace=False)
+        result.extend(rows[i] for i in indices)
+    return result
+
+
 def prepare(args: argparse.Namespace) -> None:
     synthetic_path = args.synthetic_path or "data/synthetic_rubrics.jsonl"
     output_path = args.output or OUTPUT_PATH
+    rng = np.random.default_rng(seed=args.seed)
 
-    rows: list[dict] = []
+    # ── Collect rows from each source ────────────────────────────────
+    source_buckets: dict[str, list[dict]] = {}
 
     if not args.no_synthetic:
-        rows.extend(_load_synthetic(synthetic_path, limit=args.synthetic_limit))
+        synth = _load_synthetic(synthetic_path, limit=args.synthetic_limit)
+        if synth:
+            source_buckets["synthetic"] = synth
 
     if not args.no_healthbench:
-        rows.extend(_load_healthbench(limit=args.healthbench_limit))
+        hb = _load_healthbench(limit=args.healthbench_limit)
+        if hb:
+            source_buckets["healthbench"] = hb
 
-    if not rows:
+    if args.rubrichub_path:
+        rh = _load_rubrichub(args.rubrichub_path, limit=args.rubrichub_limit)
+        if rh:
+            source_buckets["rubrichub"] = rh
+
+    if not source_buckets:
         print("[prepare_rl_data] No data found. Make sure at least one source exists.")
         return
+
+    # ── Uniform mix: upsample smaller sources to match largest ────────
+    if args.uniform_mix and len(source_buckets) > 1:
+        max_size = max(len(v) for v in source_buckets.values())
+        print(f"[prepare_rl_data] Uniform mix enabled — upsampling all sources to {max_size} rows each")
+        for name, bucket in source_buckets.items():
+            if len(bucket) < max_size:
+                print(f"  {name}: {len(bucket)} → {max_size} (×{max_size / len(bucket):.1f})")
+                source_buckets[name] = _upsample(bucket, max_size, rng)
+
+    # ── Merge and interleave ──────────────────────────────────────────
+    rows: list[dict] = []
+    for bucket in source_buckets.values():
+        rows.extend(bucket)
+
+    # Always shuffle so sources are interleaved (important for RL batches)
+    rng.shuffle(rows)
 
     df = pd.DataFrame(rows)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -163,8 +242,14 @@ def main():
     parser.add_argument("--synthetic-path", type=str, default=None, help="Path to synthetic_rubrics.jsonl")
     parser.add_argument("--synthetic-limit", type=int, default=None, help="Max synthetic rows")
     parser.add_argument("--healthbench-limit", type=int, default=None, help="Max HealthBench rows")
+    parser.add_argument("--rubrichub-path", type=str, default=None,
+                        help="Path to rubrichub_sft.jsonl (converted by prepare_rubrichub.py)")
+    parser.add_argument("--rubrichub-limit", type=int, default=None, help="Max RubricHub rows")
     parser.add_argument("--no-synthetic", action="store_true", help="Skip synthetic data")
     parser.add_argument("--no-healthbench", action="store_true", help="Skip HealthBench data")
+    parser.add_argument("--uniform-mix", action="store_true",
+                        help="Upsample smaller sources to match the largest, then shuffle")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for upsampling/shuffling")
     parser.add_argument("--output", type=str, default=OUTPUT_PATH, help=f"Output parquet path (default: {OUTPUT_PATH})")
     args = parser.parse_args()
     prepare(args)
