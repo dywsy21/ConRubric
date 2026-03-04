@@ -36,6 +36,8 @@ actor_rollout_ref:
     trust_remote_code: True
   actor:
     strategy: fsdp
+    fsdp_config:
+      param_offload: True  # offload FSDP params to CPU during rollout for GPU memory
     rollout_n: ${actor_rollout_ref.rollout.n}
     ppo_mini_batch_size: 8
     ppo_micro_batch_size_per_gpu: 2
