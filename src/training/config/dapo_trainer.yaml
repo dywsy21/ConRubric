@@ -119,7 +119,7 @@ trainer:
   experiment_name: consensus_dapo
   logger: ['console']
   nnodes: 1
-  n_gpus_per_node: 2
+  n_gpus_per_node: 1   # GPU 0 for actor+rollout; GPU 1 reserved for solver/oracle vLLM
   total_epochs: 1
   total_training_steps: ${oc.decode:${oc.env:RL_TOTAL_STEPS,1000}}
   save_freq: -1

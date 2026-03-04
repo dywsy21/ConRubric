@@ -136,8 +136,13 @@ if should_run "train"; then
   # Clear _ELASTIC_CHILD to ensure the elastic wrapper runs (not the child path).
   # This var may leak from a previous crashed elastic run.
   unset _ELASTIC_CHILD
-  # Do NOT set CUDA_VISIBLE_DEVICES — the elastic wrapper selects GPUs automatically.
-  unset CUDA_VISIBLE_DEVICES
+  # When elastic is disabled, pin to GPU 0 (GPU 1 reserved for solver/oracle vLLM).
+  # When elastic is enabled, let the elastic wrapper select GPUs automatically.
+  if [[ "${ELASTIC_TRAINING:-1}" == "0" ]]; then
+    export CUDA_VISIBLE_DEVICES="${RL_CUDA_DEVICES:-0}"
+  else
+    unset CUDA_VISIBLE_DEVICES
+  fi
   python -u -m src.training.verl_main \
     "${HYDRA_ARGS[@]}" \
     "${PASSTHROUGH_ARGS[@]}" \
