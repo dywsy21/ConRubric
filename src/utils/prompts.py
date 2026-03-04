@@ -68,7 +68,7 @@ Return JSON array only. Do not include markdown fences.
 """
 
 DYNAMIC_RUBRIC_EVALUATION_PROMPT = """
-Evaluate the Answer to the Question using the Rubric. Score 0-10.
+Evaluate the Answer to the Question using the Rubric.
 
 Question:
 {question}
@@ -79,8 +79,7 @@ Answer:
 Rubric:
 {rubric}
 
-End your response with exactly: Score: N
-Where N is an integer from 0 to 10.
+Output a single integer from 0 to 10 representing the overall score. Output ONLY the integer, nothing else.
 """
 
 # ── Oracle: batch-evaluate multiple answers against ONE rubric ────────────
@@ -98,7 +97,8 @@ Rubric:
 
 {answers_block}
 
-Output ONLY a JSON array of exactly {n} integers (0-10), one score per answer in order. No explanation, no markdown, no text — just the raw JSON array.
+Output ONLY a JSON array of exactly {n} integers (0 to 10), one score per answer in the order shown above.
+Do NOT output any explanation, markdown, or text — output ONLY the raw JSON array like [3, 7, 5, 2].
 """
 
 
