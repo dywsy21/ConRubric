@@ -69,7 +69,7 @@ actor_rollout_ref:
     response_length: ${data.max_response_length}
     log_prob_micro_batch_size_per_gpu: 2
     dtype: bfloat16
-    gpu_memory_utilization: 0.85  # RTX 6000 96GB — ample headroom
+    gpu_memory_utilization: 0.80  # RTX 6000 96GB — leave room for FSDP actor weights
     max_model_len: 1792  # prompt(1024)+response(768)=1792; exact fit
     tensor_model_parallel_size: 1
     max_num_batched_tokens: 8192
