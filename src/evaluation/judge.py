@@ -467,17 +467,16 @@ Respond with only "YES" or "NO".
         if n == 1:
             return [self.evaluate_answer(question, answers[0], rubric=rubric)]
 
+        # Shuffle answer order to eliminate positional (primacy) bias
+        order = list(range(n))
+        random.shuffle(order)
+        shuffled_answers = [answers[i] for i in order]
+
         answers_block = "\n\n".join(
-            f"--- Answer {i+1} ---\n{a}" for i, a in enumerate(answers)
+            f"--- Answer {i+1} ---\n{a}" for i, a in enumerate(shuffled_answers)
         )
-        # Generate a RANDOM example each call so the model can't memorize a fixed pattern
-        _eg = random.sample(range(0, 11), min(n, 11))
-        if n > 11:  # unlikely but safe
-            _eg = [random.randint(0, 10) for _ in range(n)]
-        example_scores = "[" + ", ".join(str(x) for x in _eg) + "]"
         prompt = BATCH_RUBRIC_EVALUATION_PROMPT.format(
             n=n, question=question, rubric=rubric, answers_block=answers_block,
-            example_scores=example_scores,
         )
 
         # vLLM guided JSON: array of n integers 0-10
@@ -491,21 +490,17 @@ Respond with only "YES" or "NO".
             },
         }
 
-        # Build the example as a list for comparison (detect lazy copying)
-        example_list = [float(x) for x in _eg]
-
         for attempt in range(max_retries):
-            # On retries, regenerate random examples + rebuild prompt to prevent copying
+            # On retries, re-shuffle answers and rebuild prompt
             if attempt > 0:
-                _eg = random.sample(range(0, 11), min(n, 11))
-                if n > 11:
-                    _eg = [random.randint(0, 10) for _ in range(n)]
-                example_scores = "[" + ", ".join(str(x) for x in _eg) + "]"
+                random.shuffle(order)
+                shuffled_answers = [answers[i] for i in order]
+                answers_block = "\n\n".join(
+                    f"--- Answer {i+1} ---\n{a}" for i, a in enumerate(shuffled_answers)
+                )
                 prompt = BATCH_RUBRIC_EVALUATION_PROMPT.format(
                     n=n, question=question, rubric=rubric, answers_block=answers_block,
-                    example_scores=example_scores,
                 )
-                example_list = [float(x) for x in _eg]
 
             extra = guided_extra if attempt == 0 else {"chat_template_kwargs": {"enable_thinking": False}}
             max_tok = 4 * n + 16 if attempt == 0 else 256
@@ -529,14 +524,11 @@ Respond with only "YES" or "NO".
 
             scores = self._parse_batch_scores(response_text, n)
             if scores is not None:
-                # Invalidate if Oracle just copied the example scores
-                if scores == example_list:
-                    print(f"[Judge] Batch scores identical to example {example_list}, "
-                          f"invalidating (attempt {attempt + 1}/{max_retries})")
-                    cache_key = _get_cache_key(self.model_name, prompt)
-                    _delete_from_cache(cache_key, "judge")
-                    continue
-                return scores
+                # Unshuffle scores back to original answer order
+                unshuffled = [0.0] * n
+                for shuffled_pos, orig_idx in enumerate(order):
+                    unshuffled[orig_idx] = scores[shuffled_pos]
+                return unshuffled
             if attempt < max_retries - 1:
                 print(f"Retrying batch evaluation (attempt {attempt + 2}/{max_retries})...")
 

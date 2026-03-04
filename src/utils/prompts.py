@@ -88,7 +88,7 @@ Where N is an integer from 0 to 10.
 # lets the judge calibrate scores against each other, making the ranking signal
 # much more meaningful than scoring each answer in isolation.
 BATCH_RUBRIC_EVALUATION_PROMPT = """
-Rate {n} answers 0-10 using the rubric. Compare them for calibration.
+You are an expert evaluator. Rate each of the {n} answers below on a 0-10 scale according to the rubric. Compare them against each other for calibration.
 
 Question:
 {question}
@@ -98,8 +98,7 @@ Rubric:
 
 {answers_block}
 
-Reply ONLY with a JSON array of exactly {n} integers.
-Format example (THIS IS ONLY A FORMAT ILLUSTRATION, NOT ACTUAL SCORES — you must judge independently): {example_scores}
+Output ONLY a JSON array of exactly {n} integers (0-10), one score per answer in order. No explanation, no markdown, no text — just the raw JSON array.
 """
 
 
