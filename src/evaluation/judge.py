@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import random
 import logging
 import hashlib
 from pathlib import Path
@@ -469,8 +470,10 @@ Respond with only "YES" or "NO".
         answers_block = "\n\n".join(
             f"--- Answer {i+1} ---\n{a}" for i, a in enumerate(answers)
         )
-        # Generate a dynamic example that always has exactly n elements
-        _eg = [8, 3, 6, 5, 7, 2, 9, 4][:n]
+        # Generate a RANDOM example each call so the model can't memorize a fixed pattern
+        _eg = random.sample(range(0, 11), min(n, 11))
+        if n > 11:  # unlikely but safe
+            _eg = [random.randint(0, 10) for _ in range(n)]
         example_scores = "[" + ", ".join(str(x) for x in _eg) + "]"
         prompt = BATCH_RUBRIC_EVALUATION_PROMPT.format(
             n=n, question=question, rubric=rubric, answers_block=answers_block,
@@ -488,35 +491,50 @@ Respond with only "YES" or "NO".
             },
         }
 
-        # Build the example as a list of ints for comparison
+        # Build the example as a list for comparison (detect lazy copying)
         example_list = [float(x) for x in _eg]
-        _example_hit = False  # track if we've seen example-copy
 
         for attempt in range(max_retries):
+            # On retries, regenerate random examples + rebuild prompt to prevent copying
+            if attempt > 0:
+                _eg = random.sample(range(0, 11), min(n, 11))
+                if n > 11:
+                    _eg = [random.randint(0, 10) for _ in range(n)]
+                example_scores = "[" + ", ".join(str(x) for x in _eg) + "]"
+                prompt = BATCH_RUBRIC_EVALUATION_PROMPT.format(
+                    n=n, question=question, rubric=rubric, answers_block=answers_block,
+                    example_scores=example_scores,
+                )
+                example_list = [float(x) for x in _eg]
+
             extra = guided_extra if attempt == 0 else {"chat_template_kwargs": {"enable_thinking": False}}
             max_tok = 4 * n + 16 if attempt == 0 else 256
-            # Use small temperature on retries after example-copy to get varied output
-            temp = 0.3 if _example_hit else 0.0
+            temp = 0.0 if attempt == 0 else 0.5
             
             try:
                 response_text = self._call_api_direct(
-                    prompt, temperature=temp, use_cache=(attempt == 0 and not _example_hit),
+                    prompt, temperature=temp, use_cache=(attempt == 0),
                     extra_body=extra, max_tokens=max_tok,
                 )
-            except Exception:
-                response_text = self._call_api(prompt, temperature=temp,
-                                               use_cache=(attempt == 0 and not _example_hit))
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"Judge API error (attempt {attempt + 1}/{max_retries}): {e}")
+                    continue
+                response_text = None
             
+            if response_text is None:
+                if attempt < max_retries - 1:
+                    print(f"Retrying batch evaluation (attempt {attempt + 2}/{max_retries})...")
+                continue
+
             scores = self._parse_batch_scores(response_text, n)
             if scores is not None:
                 # Invalidate if Oracle just copied the example scores
                 if scores == example_list:
                     print(f"[Judge] Batch scores identical to example {example_list}, "
                           f"invalidating (attempt {attempt + 1}/{max_retries})")
-                    # Clear cache so retry gets a fresh response
                     cache_key = _get_cache_key(self.model_name, prompt)
                     _delete_from_cache(cache_key, "judge")
-                    _example_hit = True
                     continue
                 return scores
             if attempt < max_retries - 1:
