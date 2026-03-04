@@ -10,7 +10,8 @@ dependencies = [
     "transformers>=4.46.0,<5.0.0",
     "datasets>=2.14.0",
     "accelerate>=0.25.0",
-    "flash-attn",
+    # flash-attn: install separately via prebuilt wheel (needs GPU arch match)
+    # "flash-attn",
     "numpy<2.0.0",
 
     # ── verl core deps (from volcengine/verl setup.py install_requires) ──
