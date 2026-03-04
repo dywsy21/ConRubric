@@ -54,7 +54,7 @@ actor_rollout_ref:
     loss_agg_mode: token-mean
     use_kl_loss: False
     optim:
-      lr: 5e-5  # Increased from 2e-5 to encourage larger policy updates (pg_clipfrac was 0.0)
+      lr: 1e-5  # Reduced from 5e-5 (collapse at step 5-6), higher than original 2e-5 for pg_clipfrac
       lr_warmup_steps_ratio: 0.0
       min_lr_ratio: 1.0
       weight_decay: 0.1
