@@ -52,6 +52,14 @@ def _save_to_cache(cache_key: str, response: str, cache_type: str = "judge"):
     except Exception as e:
         print(f"Warning: Failed to save cache: {e}")
 
+def _delete_from_cache(cache_key: str, cache_type: str = "judge"):
+    """Delete a cached response so the next call gets a fresh result."""
+    cache_file = CACHE_DIR / cache_type / f"{cache_key}.json"
+    try:
+        cache_file.unlink(missing_ok=True)
+    except Exception:
+        pass
+
 # Default timeout settings
 DEFAULT_TIMEOUT = 300  # 5 minutes
 MAX_RETRIES = 3
@@ -480,20 +488,36 @@ Respond with only "YES" or "NO".
             },
         }
 
+        # Build the example as a list of ints for comparison
+        example_list = [float(x) for x in _eg]
+        _example_hit = False  # track if we've seen example-copy
+
         for attempt in range(max_retries):
             extra = guided_extra if attempt == 0 else {"chat_template_kwargs": {"enable_thinking": False}}
             max_tok = 4 * n + 16 if attempt == 0 else 256
+            # Use small temperature on retries after example-copy to get varied output
+            temp = 0.3 if _example_hit else 0.0
             
             try:
                 response_text = self._call_api_direct(
-                    prompt, temperature=0.0, use_cache=(attempt == 0),
+                    prompt, temperature=temp, use_cache=(attempt == 0 and not _example_hit),
                     extra_body=extra, max_tokens=max_tok,
                 )
             except Exception:
-                response_text = self._call_api(prompt, temperature=0.0, use_cache=(attempt == 0))
+                response_text = self._call_api(prompt, temperature=temp,
+                                               use_cache=(attempt == 0 and not _example_hit))
             
             scores = self._parse_batch_scores(response_text, n)
             if scores is not None:
+                # Invalidate if Oracle just copied the example scores
+                if scores == example_list:
+                    print(f"[Judge] Batch scores identical to example {example_list}, "
+                          f"invalidating (attempt {attempt + 1}/{max_retries})")
+                    # Clear cache so retry gets a fresh response
+                    cache_key = _get_cache_key(self.model_name, prompt)
+                    _delete_from_cache(cache_key, "judge")
+                    _example_hit = True
+                    continue
                 return scores
             if attempt < max_retries - 1:
                 print(f"Retrying batch evaluation (attempt {attempt + 2}/{max_retries})...")
