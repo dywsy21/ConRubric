@@ -62,7 +62,7 @@ actor_rollout_ref:
   rollout:
     name: vllm
     mode: async
-    n: 5
+    n: 4
     temperature: 1.0
     top_k: -1
     top_p: 1.0
@@ -75,7 +75,7 @@ actor_rollout_ref:
     max_model_len: 2560  # prompt(1024)+response(1536)=2560
     tensor_model_parallel_size: 1
     max_num_batched_tokens: 4096
-    max_num_seqs: 64  # rollout batch = train_batch 8 × n 5 = 40 seqs max
+    max_num_seqs: 64  # rollout batch = train_batch 8 × n 4 = 32 seqs max
     enforce_eager: True
     free_cache_engine: True
     val_kwargs:
