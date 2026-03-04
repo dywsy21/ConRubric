@@ -14,7 +14,7 @@ data:
   prompt_key: prompt
   reward_fn_key: data_source
   max_prompt_length: 1024
-  max_response_length: 768
+  max_response_length: 1536
   train_batch_size: 8
   gen_batch_size: ${data.train_batch_size}
   shuffle: True
@@ -54,7 +54,7 @@ actor_rollout_ref:
     loss_agg_mode: token-mean
     use_kl_loss: False
     optim:
-      lr: 1e-6
+      lr: 5e-6
       lr_warmup_steps_ratio: 0.0
       min_lr_ratio: 1.0
       weight_decay: 0.1
@@ -71,8 +71,8 @@ actor_rollout_ref:
     response_length: ${data.max_response_length}
     log_prob_micro_batch_size_per_gpu: 2
     dtype: bfloat16
-    gpu_memory_utilization: 0.40  # Only ~8 GiB KV cache needed (batch 32 × 1792 tokens); leave room for FSDP
-    max_model_len: 1792  # prompt(1024)+response(768)=1792; exact fit
+    gpu_memory_utilization: 0.50  # KV cache for batch 32 × 2560 tokens; leave room for FSDP
+    max_model_len: 2560  # prompt(1024)+response(1536)=2560
     tensor_model_parallel_size: 1
     max_num_batched_tokens: 4096
     max_num_seqs: 64  # rollout batch = train_batch 8 × n 4 = 32 seqs max
@@ -124,8 +124,8 @@ trainer:
   n_gpus_per_node: 1   # GPU 0 for actor+rollout; GPU 1 reserved for solver/oracle vLLM
   total_epochs: 1
   total_training_steps: ${oc.decode:${oc.env:RL_TOTAL_STEPS,1000}}
-  save_freq: -1
-  test_freq: -1
+  save_freq: 50
+  test_freq: 100
   val_before_train: False
   val_only: False
   resume_mode: disable
