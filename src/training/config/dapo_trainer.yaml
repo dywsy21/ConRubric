@@ -36,14 +36,10 @@ actor_rollout_ref:
     trust_remote_code: True
   actor:
     strategy: fsdp
-    fsdp_config:
-      param_offload: true       # Offload actor weights to CPU during init → frees GPU before vLLM starts
-      optimizer_offload: true   # Offload Adam states to CPU (~32GB savings)
-      grad_offload: true        # Offload gradients to CPU (~8GB savings)
     rollout_n: ${actor_rollout_ref.rollout.n}
     ppo_mini_batch_size: 8
-    ppo_micro_batch_size_per_gpu: 1   # Reduced from 2 to save activation memory
-    ppo_max_token_len_per_gpu: 4096   # Reduced from 8192 to save memory
+    ppo_micro_batch_size_per_gpu: 2
+    ppo_max_token_len_per_gpu: 8192
     ppo_epochs: 1
     shuffle: False
     use_dynamic_bsz: False
@@ -71,18 +67,15 @@ actor_rollout_ref:
     do_sample: True
     prompt_length: ${data.max_prompt_length}
     response_length: ${data.max_response_length}
-    log_prob_micro_batch_size_per_gpu: 1
+    log_prob_micro_batch_size_per_gpu: 2
     dtype: bfloat16
-    gpu_memory_utilization: 0.5   # Low for safe init (co-located with FSDP actor + other users); runtime KV cache size controlled by num_gpu_blocks_override
+    gpu_memory_utilization: 0.85  # RTX 6000 96GB — ample headroom
     max_model_len: 1792  # prompt(1024)+response(768)=1792; exact fit
     tensor_model_parallel_size: 1
-    max_num_batched_tokens: 4096
-    max_num_seqs: 64
+    max_num_batched_tokens: 8192
+    max_num_seqs: 256
     enforce_eager: True
     free_cache_engine: True
-    engine_kwargs:
-      vllm:
-        num_gpu_blocks_override: 500
     val_kwargs:
       top_k: -1
       top_p: 1.0
@@ -126,7 +119,7 @@ trainer:
   experiment_name: consensus_dapo
   logger: ['console']
   nnodes: 1
-  n_gpus_per_node: 1
+  n_gpus_per_node: 2
   total_epochs: 1
   total_training_steps: ${oc.decode:${oc.env:RL_TOTAL_STEPS,1000}}
   save_freq: -1
