@@ -71,11 +71,11 @@ actor_rollout_ref:
     response_length: ${data.max_response_length}
     log_prob_micro_batch_size_per_gpu: 2
     dtype: bfloat16
-    gpu_memory_utilization: 0.80  # RTX 6000 96GB — leave room for FSDP actor weights
+    gpu_memory_utilization: 0.40  # Only ~8 GiB KV cache needed (batch 32 × 1792 tokens); leave room for FSDP
     max_model_len: 1792  # prompt(1024)+response(768)=1792; exact fit
     tensor_model_parallel_size: 1
-    max_num_batched_tokens: 8192
-    max_num_seqs: 256
+    max_num_batched_tokens: 4096
+    max_num_seqs: 64  # rollout batch = train_batch 8 × n 4 = 32 seqs max
     enforce_eager: True
     free_cache_engine: True
     val_kwargs:
