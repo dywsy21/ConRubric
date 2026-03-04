@@ -604,59 +604,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     def _build_rollout(self, trust_remote_code=False):
         from torch.distributed.device_mesh import init_device_mesh
-        import gc
 
-        # Force-free GPU memory before vLLM init (critical for shared GPU scenarios)
+        # Note: previously had aggressive cleanup that moved FSDP params to CPU
+        # before vLLM init.  This broke FSDP state tracking.  Instead, use a
+        # lower gpu_memory_utilization (e.g. 0.80) so vLLM can co-exist with
+        # FSDP params on the same GPU without needing to offload.
         if self._is_actor and hasattr(self, 'actor_module_fsdp'):
             print(f"[DEBUG] _build_rollout: _is_offload_param={self._is_offload_param}")
-            print(f"[DEBUG] GPU mem BEFORE cleanup: alloc={torch.cuda.memory_allocated()/1e9:.2f}GB")
-
+            print(f"[DEBUG] GPU mem at rollout build: alloc={torch.cuda.memory_allocated()/1e9:.2f}GB")
             if self._is_offload_param:
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-            
-            # FSDP1 with NO_SHARD leaves residual GPU tensors (flat param copies,
-            # mixed-precision buffers). Force ALL model tensors to CPU.
-            for module in self.actor_module_fsdp.modules():
-                for key, buf in list(module._buffers.items()):
-                    if buf is not None and buf.is_cuda:
-                        module._buffers[key] = buf.to('cpu')
-                # Force flat params in FSDP handles to CPU
-                if hasattr(module, '_handles'):
-                    for handle in module._handles:
-                        if hasattr(handle, 'flat_param') and handle.flat_param.data.is_cuda:
-                            handle.flat_param_to(torch.device("cpu"), non_blocking=False)
-                            handle.flat_param._local_shard = handle.flat_param.data
-                if hasattr(module, '_all_handles'):
-                    for handle in module._all_handles:
-                        if hasattr(handle, 'flat_param') and handle.flat_param.data.is_cuda:
-                            handle.flat_param_to(torch.device("cpu"), non_blocking=False)
-                            handle.flat_param._local_shard = handle.flat_param.data
-            
-            # Also force the unwrapped module's parameters to CPU
-            if hasattr(self, 'actor_module'):
-                for param in self.actor_module.parameters():
-                    if param.data.is_cuda:
-                        param.data = param.data.to('cpu')
-                for buf in self.actor_module.buffers():
-                    if buf.data.is_cuda:
-                        buf.data = buf.data.to('cpu')
-            
-            # Nuclear option: find and move ALL orphaned GPU tensors via gc
-            gc.collect()
-            moved = 0
-            for obj in gc.get_objects():
-                try:
-                    if torch.is_tensor(obj) and obj.is_cuda and obj.numel() > 1000:
-                        obj.data = obj.data.to('cpu')
-                        moved += 1
-                except:
-                    pass
-            
-            gc.collect()
-            torch.cuda.empty_cache()
-            print(f"[DEBUG] Moved {moved} GPU tensors to CPU")
-            print(f"[DEBUG] GPU mem AFTER cleanup: alloc={torch.cuda.memory_allocated()/1e9:.2f}GB, reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
-            log_gpu_memory_usage("Before building rollout (after actor offload)", logger=logger)
 
         # 1. parse rollout and huggingface model config
         rollout_config: RolloutConfig = omega_conf_to_dataclass(self.config.rollout)
