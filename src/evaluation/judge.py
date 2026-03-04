@@ -461,8 +461,12 @@ Respond with only "YES" or "NO".
         answers_block = "\n\n".join(
             f"--- Answer {i+1} ---\n{a}" for i, a in enumerate(answers)
         )
+        # Generate a dynamic example that always has exactly n elements
+        _eg = [8, 3, 6, 5, 7, 2, 9, 4][:n]
+        example_scores = "[" + ", ".join(str(x) for x in _eg) + "]"
         prompt = BATCH_RUBRIC_EVALUATION_PROMPT.format(
             n=n, question=question, rubric=rubric, answers_block=answers_block,
+            example_scores=example_scores,
         )
 
         # vLLM guided JSON: array of n integers 0-10

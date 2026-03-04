@@ -98,7 +98,7 @@ Rubric:
 
 {answers_block}
 
-Reply with a JSON array of {n} integers, e.g. [8, 3, 6]
+Reply ONLY with a JSON array of exactly {n} integers. Example for {n} answers: {example_scores}
 """
 
 
