@@ -98,7 +98,18 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         # All garbage detection is delegated to the Solver model, which
         # outputs <GARBAGE_RUBRIC> when it receives a nonsensical rubric.
         # See meta_reward.py _coordinate_question() for the detection logic.
-        global_step = data.meta_info.get("global_steps", None) if hasattr(data, "meta_info") else None
+        global_step = None
+        if hasattr(data, "meta_info") and data.meta_info:
+            global_step = data.meta_info.get("global_steps", None)
+        if global_step is None:
+            # Try batch-level non_tensor_batch
+            for i in range(min(1, batch_size)):
+                item = data[i]
+                if hasattr(item, "meta_info") and item.meta_info:
+                    global_step = item.meta_info.get("global_steps", None)
+                    if global_step is not None:
+                        break
+        print(f"[RewardManager] global_step={global_step}, meta_info keys={list(data.meta_info.keys()) if hasattr(data, 'meta_info') and data.meta_info else 'N/A'}")
         scalar_rewards = self.reward_fn.compute_reward(questions, rubrics, global_step=global_step)
 
         for i, score in enumerate(scalar_rewards):
