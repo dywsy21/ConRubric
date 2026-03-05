@@ -14,63 +14,35 @@ from verl.workers.reward_manager.registry import REWARD_MANAGER_REGISTRY
 print("Imported meta_reward_manager.py")
 
 
-def _is_garbage_rubric(text: str, debug: bool = False) -> bool:
-    """Detect garbage / degenerate rubrics that should receive reward=0.
+def _is_garbage_rubric(text: str) -> bool:
+    """Fast pre-filter for truly degenerate rubrics (reward → 0).
+
+    Only catches extreme cases — real garbage detection is delegated to the
+    Solver model, which outputs <GARBAGE_RUBRIC> when it receives nonsensical
+    input.
 
     Criteria (any → garbage):
-      1. Near-empty: fewer than 50 non-whitespace characters.
+      1. Near-empty: fewer than 20 non-whitespace characters.
       2. Repetitive character spam: a single character repeated 10+ times in a
-         row dominates > 60 % of the text (e.g. "||||||||||||" or "----------").
-      3. No parseable criteria: no bullet points (*/-), numbered lists, or
-         point markers like [+10], [-5], [criterion], etc.
-      4. Extremely low character diversity: unique chars / len < 0.03 (after
-         collapsing whitespace).
+         row dominates > 60 % of the text.
+      3. Extremely low character diversity: unique chars / len < 0.03.
     """
     stripped = text.strip()
 
-    # 1. Too short to be a real rubric
+    # 1. Near-empty
     non_ws = re.sub(r"\s", "", stripped)
-    if len(non_ws) < 50:
-        if debug:
-            print(f"  [GARBRE] Too short: {len(non_ws)} chars")
+    if len(non_ws) < 20:
         return True
 
-    # 2. Repetitive single-char spam (very generous threshold)
+    # 2. Repetitive single-char spam
     runs = re.findall(r"(.)\1{9,}", stripped)  # char repeated 10+ times
     total_run_len = sum(len(m) for m in runs)
     if total_run_len > 0.6 * len(stripped):
-        if debug:
-            print(f"  [GARBRE] Repetitive spam: {total_run_len}/{len(stripped)}")
         return True
 
-    # 3. No parseable criterion markers - be very permissive
-    # Accept: bullets, numbers, point markers like [+10], [-5], [criterion X], etc.
-    has_criterion = bool(re.search(
-        r"(?:[-*•]\s*\[?[+-]?\d|^\d+[\.\)]|\[criterion|points:|score:|rubric:)",
-        stripped,
-        re.IGNORECASE | re.MULTILINE,
-    ))
-    if not has_criterion:
-        # Fallback: look for any bracketed point value
-        has_criterion = bool(re.search(r"\[[+-]\d+\]", stripped))
-    if not has_criterion:
-        # Final fallback: any line with "criterion" or "points" keyword
-        has_criterion = bool(re.search(
-            r"(?:criterion|points|score|rubric)",
-            stripped,
-            re.IGNORECASE,
-        ))
-    if not has_criterion:
-        if debug:
-            print(f"  [GARBRE] No criterion markers found")
-            print(f"    Text preview: {stripped[:100]!r}")
-        return True
-
-    # 4. Very low character diversity (extremely permissive)
+    # 3. Extremely low character diversity
     unique_chars = len(set(non_ws.lower()))
     if unique_chars / max(len(non_ws), 1) < 0.03:
-        if debug:
-            print(f"  [GARBRE] Low diversity: {unique_chars}/{len(non_ws)}={unique_chars/max(len(non_ws), 1):.3f}")
         return True
 
     return False
