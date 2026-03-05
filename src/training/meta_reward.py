@@ -1,8 +1,10 @@
+import json
 import os
 import random
 import threading
 import torch
 import numpy as np
+from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, Future, as_completed
@@ -37,6 +39,9 @@ RUBRIC_QUALITY_CONFIG = RubricQualityConfig()
 # Marker the solver outputs when it detects a garbage rubric
 GARBAGE_RUBRIC_MARKER = "<GARBAGE_RUBRIC>"
 
+# Rollout logging directory
+ROLLOUT_LOG_DIR = os.environ.get("GRM_ROLLOUT_LOG_DIR", "out/rl/rollout_logs")
+
 class MetaRewardFunction:
     def __init__(self, solver_model_name: str, oracle_model_name: str, 
                  oracle_api_key: str = None, oracle_api_base: str = None,
@@ -52,6 +57,7 @@ class MetaRewardFunction:
         }
         self._oracle = None
         self._solver = None
+        self._step_counter = 0
 
     @property
     def oracle(self):
@@ -101,7 +107,8 @@ class MetaRewardFunction:
         
     def compute_reward(self, questions: List[str], rubrics: List[str],
                        solver_workers: int = None,
-                       oracle_workers: int = None) -> torch.Tensor:
+                       oracle_workers: int = None,
+                       global_step: int = None) -> torch.Tensor:
         """
         Computes the Consensus-Based Meta-Reward with pipelined execution,
         K-sparse cross-evaluation, optional matrix completion, and rubric
@@ -127,7 +134,12 @@ class MetaRewardFunction:
         use_mc = USE_MATRIX_COMPLETION
         solver_n = SOLVER_N  # 0 = use all N rubrics
 
-        print(f"[MetaReward] Computing rewards for {len(questions)} samples, "
+        # Use global_step if provided, otherwise fall back to internal counter
+        if global_step is not None:
+            self._step_counter = global_step
+
+        print(f"[MetaReward] Computing rewards for {len(questions)} samples "
+              f"(global_step={self._step_counter}), "
               f"solver_workers={solver_workers}, oracle_workers={oracle_workers}, "
               f"K_sparse={k_sparse or 'full'}, matrix_completion={use_mc}, "
               f"solver_n={solver_n or 'all'}, "
@@ -149,6 +161,9 @@ class MetaRewardFunction:
             for idx, rubric in enumerate(rubrics):
                 result = score_rubric_quality(rubric, RUBRIC_QUALITY_CONFIG)
                 quality_adjustments[idx] = result.total_adjustment
+
+        # Per-question answer storage for rollout logging
+        question_answers: Dict[int, Dict[int, str]] = {}  # q_idx -> {local_i -> answer}
 
         # Shared thread-pools – one for each remote service.
         solver_pool = ThreadPoolExecutor(max_workers=max(1, solver_workers))
@@ -277,6 +292,9 @@ class MetaRewardFunction:
                 except Exception as e:
                     print(f"[MetaReward] Solver error Q{q_idx} rubric {local_i}: {e}")
                     answers[local_i] = ""
+
+            # Store answers for logging before garbage filtering
+            question_answers[q_idx] = dict(answers)
 
             # ── Solver-based garbage detection ─────────────────────────
             # If the solver output contains <GARBAGE_RUBRIC>, the rubric was
@@ -446,8 +464,99 @@ class MetaRewardFunction:
         oracle_pool.shutdown(wait=False)
         coordinator_pool.shutdown(wait=False)
 
+        # ── Log sample (question, rubrics) to stdout ──────────────
+        self._log_sample_rubrics(q_items, rewards)
+
+        # ── Rollout logging ────────────────────────────────────────
+        if global_step is None:
+            self._step_counter += 1
+        self._save_rollout_log(
+            step=self._step_counter,
+            q_items=q_items,
+            question_answers=question_answers,
+            rewards=rewards,
+        )
+
         print(f"[MetaReward] All rewards computed, mean={rewards.mean():.3f}")
         return rewards
+
+    def _log_sample_rubrics(
+        self,
+        q_items: List[Tuple[str, List[Tuple[int, str]]]],
+        rewards: torch.Tensor,
+    ):
+        """Print sample (question, rubrics) pairs to stdout for qualitative monitoring."""
+        # Log first question's rubrics in full, plus a brief summary of others
+        n_to_show = min(1, len(q_items))  # show 1 full example per step
+        print(f"\n{'='*80}")
+        print(f"[RubricSample] Step {self._step_counter} — "
+              f"{len(q_items)} questions, showing {n_to_show} full example(s)")
+        print(f"{'='*80}")
+
+        for q_idx in range(n_to_show):
+            q, items = q_items[q_idx]
+            indices = [it[0] for it in items]
+            print(f"\n[Q{q_idx+1}] {q[:300]}")
+            print(f"  ({len(items)} rubrics generated)")
+            for local_i, (global_idx, rubric) in enumerate(items):
+                r = rewards[global_idx].item()
+                # Show first 500 chars of each rubric
+                rubric_preview = rubric[:500].replace('\n', '\n    ')
+                print(f"  --- Rubric {local_i+1} (reward={r:.3f}) ---")
+                print(f"    {rubric_preview}")
+                if len(rubric) > 500:
+                    print(f"    ... ({len(rubric)} chars total)")
+
+        # Summary for the rest
+        if len(q_items) > n_to_show:
+            print(f"\n[RubricSample] Other questions summary:")
+            for q_idx in range(n_to_show, len(q_items)):
+                q, items = q_items[q_idx]
+                indices = [it[0] for it in items]
+                rews = [rewards[it[0]].item() for it in items]
+                lens = [len(it[1]) for it in items]
+                print(f"  Q{q_idx+1}: \"{q[:80]}...\" "
+                      f"| {len(items)} rubrics | rewards={[f'{r:.2f}' for r in rews]} "
+                      f"| lengths={lens}")
+
+        print(f"{'='*80}\n")
+
+    def _save_rollout_log(
+        self,
+        step: int,
+        q_items: List[Tuple[str, List[Tuple[int, str]]]],
+        question_answers: Dict[int, Dict[int, str]],
+        rewards: torch.Tensor,
+    ):
+        """Save per-step rollout log: question, rubrics, answers, rewards."""
+        log_dir = Path(ROLLOUT_LOG_DIR)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"step_{step:04d}.jsonl"
+
+        try:
+            with open(log_file, "w", encoding="utf-8") as f:
+                for q_idx, (q, items) in enumerate(q_items):
+                    indices = [it[0] for it in items]
+                    rubric_texts = [it[1] for it in items]
+                    answers_dict = question_answers.get(q_idx, {})
+
+                    rollouts = []
+                    for local_i, (global_idx, rubric) in enumerate(items):
+                        rollouts.append({
+                            "rubric": rubric[:2000],  # truncate for readability
+                            "answer": answers_dict.get(local_i, "")[:2000],
+                            "reward": round(rewards[global_idx].item(), 4),
+                        })
+
+                    record = {
+                        "question": q[:500],
+                        "n_rollouts": len(items),
+                        "rollouts": rollouts,
+                    }
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            print(f"[MetaReward] Rollout log saved: {log_file}")
+        except Exception as e:
+            print(f"[MetaReward] Failed to save rollout log: {e}")
 
     def _generate_answer(self, question: str, rubric: str) -> str:
         return self.solver.generate_answer(question, rubric) 

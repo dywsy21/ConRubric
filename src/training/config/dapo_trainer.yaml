@@ -57,7 +57,9 @@ actor_rollout_ref:
     clip_ratio_high: 0.28
     clip_ratio_c: 3.0
     loss_agg_mode: token-mean
-    use_kl_loss: False              # DAPO: no explicit KL loss
+    use_kl_loss: True               # Enable KL loss to prevent policy drift from SFT
+    kl_loss_coef: 0.02              # Moderate KL penalty (default 0.001 too weak)
+    kl_loss_type: low_var_kl        # Lower-variance KL estimator
     optim:
       lr: 5e-6
       lr_warmup_steps_ratio: 0.05   # 5% warmup (constant schedule with warmup)
@@ -89,6 +91,10 @@ actor_rollout_ref:
       temperature: 0.0
       n: 1
       do_sample: False
+  ref:
+    log_prob_micro_batch_size_per_gpu: 2
+    fsdp_config:
+      param_offload: True  # offload ref model params to CPU
 
 critic:
   enable: False
@@ -129,11 +135,11 @@ trainer:
   n_gpus_per_node: 1   # GPU 0 for actor+rollout; GPU 1 reserved for solver/oracle vLLM
   total_epochs: 1
   total_training_steps: ${oc.decode:${oc.env:RL_TOTAL_STEPS,1000}}
-  save_freq: 50
-  test_freq: 500
+  save_freq: 20
+  test_freq: 99999
   val_before_train: False
   val_only: False
-  resume_mode: disable
+  resume_mode: auto
   default_local_dir: out/rl
   device: cuda
 
