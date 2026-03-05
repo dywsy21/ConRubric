@@ -14,7 +14,7 @@ from verl.workers.reward_manager.registry import REWARD_MANAGER_REGISTRY
 print("Imported meta_reward_manager.py")
 
 
-def _is_garbage_rubric(text: str) -> bool:
+def _is_garbage_rubric(text: str, debug: bool = False) -> bool:
     """Detect garbage / degenerate rubrics that should receive reward=0.
 
     Criteria (any → garbage):
@@ -31,12 +31,16 @@ def _is_garbage_rubric(text: str) -> bool:
     # 1. Too short to be a real rubric
     non_ws = re.sub(r"\s", "", stripped)
     if len(non_ws) < 50:
+        if debug:
+            print(f"  [GARBRE] Too short: {len(non_ws)} chars")
         return True
 
     # 2. Repetitive single-char spam (very generous threshold)
     runs = re.findall(r"(.)\1{9,}", stripped)  # char repeated 10+ times
     total_run_len = sum(len(m) for m in runs)
     if total_run_len > 0.6 * len(stripped):
+        if debug:
+            print(f"  [GARBRE] Repetitive spam: {total_run_len}/{len(stripped)}")
         return True
 
     # 3. No parseable criterion markers - be very permissive
@@ -57,11 +61,16 @@ def _is_garbage_rubric(text: str) -> bool:
             re.IGNORECASE,
         ))
     if not has_criterion:
+        if debug:
+            print(f"  [GARBRE] No criterion markers found")
+            print(f"    Text preview: {stripped[:100]!r}")
         return True
 
     # 4. Very low character diversity (extremely permissive)
     unique_chars = len(set(non_ws.lower()))
     if unique_chars / max(len(non_ws), 1) < 0.03:
+        if debug:
+            print(f"  [GARBRE] Low diversity: {unique_chars}/{len(non_ws)}={unique_chars/max(len(non_ws), 1):.3f}")
         return True
 
     return False
@@ -153,18 +162,16 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         # Detect degenerate rubrics BEFORE calling the expensive solver/oracle
         # pipeline. Garbage rubrics get reward=0 immediately; only valid
         # rubrics are passed to compute_reward().
-        garbage_mask = [_is_garbage_rubric(r) for r in rubrics]
+        garbage_mask = []
+        for i, r in enumerate(rubrics):
+            is_garb = _is_garbage_rubric(r, debug=(i < 3))
+            garbage_mask.append(is_garb)
+        
         n_garbage = sum(garbage_mask)
         if n_garbage:
             print(f"[RewardManager] Detected {n_garbage}/{batch_size} garbage rubrics → reward=0")
-            # Print first 3 garbage samples for debugging
-            for i, is_garb in enumerate(garbage_mask):
-                if is_garb and i < 3:
-                    print(f"  [garbage {i}] {rubrics[i][:200]!r}...")
         else:
-            # Print first valid rubric as sanity check
             print(f"[RewardManager] All {batch_size} rubrics passed quality check")
-            print(f"  [sample] {rubrics[0][:200]!r}...")
 
         # Build filtered lists for non-garbage rubrics
         valid_indices = [i for i, g in enumerate(garbage_mask) if not g]
