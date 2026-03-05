@@ -78,7 +78,7 @@ actor_rollout_ref:
     response_length: ${data.max_response_length}
     log_prob_micro_batch_size_per_gpu: 2
     dtype: bfloat16
-    gpu_memory_utilization: 0.50
+    gpu_memory_utilization: 0.35
     max_model_len: 2048             # prompt(1024)+response(1024)=2048
     tensor_model_parallel_size: 1
     max_num_batched_tokens: 8192
