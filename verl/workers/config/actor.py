@@ -144,6 +144,8 @@ class ActorConfig(BaseConfig):
     loss_agg_mode: str = "token-mean"
     loss_scale_factor: Optional[int] = None
     entropy_coeff: float = 0
+    entropy_coeff_min: float = 0        # floor for entropy scheduling (0 = no scheduling)
+    entropy_warmup_steps: int = 0       # decay from entropy_coeff → entropy_coeff_min over this many steps
     tau_pos: float = 1.0
     tau_neg: float = 1.05
     calculate_entropy: bool = False
