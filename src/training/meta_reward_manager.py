@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from typing import Any
 
@@ -11,6 +12,55 @@ from verl.workers.reward_manager.abstract import AbstractRewardManager
 from verl.workers.reward_manager.registry import REWARD_MANAGER_REGISTRY
 
 print("Imported meta_reward_manager.py")
+
+
+def _is_garbage_rubric(text: str) -> bool:
+    """Detect garbage / degenerate rubrics that should receive reward=0.
+
+    Criteria (any → garbage):
+      1. Near-empty: fewer than 20 non-whitespace characters.
+      2. Repetitive character spam: a single character repeated 5+ times in a
+         row dominates > 40 % of the text (e.g. "||||||||" or "------").
+      3. No parseable criteria: no lines starting with bullets (*/-), numbered
+         lists (1./1)), or headers (#).
+      4. Extremely low character diversity: unique chars / len < 0.05 (after
+         collapsing whitespace).
+    """
+    stripped = text.strip()
+
+    # 1. Too short to be a real rubric
+    non_ws = re.sub(r"\s", "", stripped)
+    if len(non_ws) < 20:
+        return True
+
+    # 2. Repetitive single-char runs
+    runs = re.findall(r"(.)\1{4,}", stripped)  # char repeated 5+ times
+    total_run_len = sum(len(m) * 5 for m in runs)  # lower-bound estimate
+    if total_run_len > 0.4 * len(stripped):
+        return True
+
+    # 3. No parseable criterion markers
+    has_criterion = bool(re.search(
+        r"^[\s]*(?:[-*•]|\d+[.)\]]|#{1,3}\s)",
+        stripped,
+        re.MULTILINE,
+    ))
+    if not has_criterion:
+        # Also accept lines with "criterion" / "points" / "score" keywords
+        has_criterion = bool(re.search(
+            r"(?:criterion|points|score|rubric)",
+            stripped,
+            re.IGNORECASE,
+        ))
+    if not has_criterion:
+        return True
+
+    # 4. Very low character diversity
+    unique_chars = len(set(non_ws.lower()))
+    if unique_chars / max(len(non_ws), 1) < 0.05:
+        return True
+
+    return False
 
 
 class MetaConsensusRewardManager(AbstractRewardManager):
@@ -95,7 +145,32 @@ class MetaConsensusRewardManager(AbstractRewardManager):
             rubrics.append(response_str)
             valid_response_lengths.append(max(valid_response_len, 1))
 
-        scalar_rewards = self.reward_fn.compute_reward(questions, rubrics)
+        # ── Garbage rubric detection ───────────────────────────────────
+        # Detect degenerate rubrics BEFORE calling the expensive solver/oracle
+        # pipeline. Garbage rubrics get reward=0 immediately; only valid
+        # rubrics are passed to compute_reward().
+        garbage_mask = [_is_garbage_rubric(r) for r in rubrics]
+        n_garbage = sum(garbage_mask)
+        if n_garbage:
+            print(f"[RewardManager] Detected {n_garbage}/{batch_size} garbage rubrics → reward=0")
+            for i, is_garb in enumerate(garbage_mask):
+                if is_garb:
+                    print(f"  [garbage {i}] {rubrics[i][:120]!r}...")
+
+        # Build filtered lists for non-garbage rubrics
+        valid_indices = [i for i, g in enumerate(garbage_mask) if not g]
+
+        if valid_indices:
+            valid_questions = [questions[i] for i in valid_indices]
+            valid_rubrics = [rubrics[i] for i in valid_indices]
+            valid_scalar_rewards = self.reward_fn.compute_reward(valid_questions, valid_rubrics)
+        else:
+            valid_scalar_rewards = torch.tensor([])
+
+        # Merge back: garbage → 0, valid → computed reward
+        scalar_rewards = torch.zeros(batch_size, dtype=torch.float32)
+        for out_idx, orig_idx in enumerate(valid_indices):
+            scalar_rewards[orig_idx] = valid_scalar_rewards[out_idx]
 
         for i, score in enumerate(scalar_rewards):
             rewards[i, valid_response_lengths[i] - 1] = float(score)

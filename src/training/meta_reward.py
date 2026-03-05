@@ -22,6 +22,9 @@ DEFAULT_ORACLE_WORKERS = int(os.environ.get("GRM_ORACLE_WORKERS", 4))
 # K-sparse cross-evaluation: 0 means "use all N-1" (full matrix, backward compat)
 K_SPARSE = int(os.environ.get("GRM_K_SPARSE", "0"))
 
+# Maximum number of solver answers per question group (0 = same as N)
+SOLVER_N = int(os.environ.get("GRM_SOLVER_N", "0"))
+
 # Matrix completion after K-sparse observation
 USE_MATRIX_COMPLETION = os.environ.get("GRM_USE_MATRIX_COMPLETION", "false").lower() in ("1", "true", "yes")
 MC_RANK = int(os.environ.get("GRM_MC_RANK", "3"))
@@ -119,10 +122,12 @@ class MetaRewardFunction:
 
         k_sparse = K_SPARSE
         use_mc = USE_MATRIX_COMPLETION
+        solver_n = SOLVER_N  # 0 = use all N rubrics
 
         print(f"[MetaReward] Computing rewards for {len(questions)} samples, "
               f"solver_workers={solver_workers}, oracle_workers={oracle_workers}, "
               f"K_sparse={k_sparse or 'full'}, matrix_completion={use_mc}, "
+              f"solver_n={solver_n or 'all'}, "
               f"rubric_quality={RUBRIC_QUALITY_CONFIG.enabled}")
 
         # ── Group by question ──────────────────────────────────────────
@@ -217,13 +222,24 @@ class MetaRewardFunction:
 
             return eval_sets
 
-        # ── Phase 1: Submit ALL solver tasks across ALL questions ──────
+        # ── Phase 1: Submit solver tasks (optionally capped by solver_n) ──
         solver_futures: Dict[int, List[Tuple[int, Future]]] = {}
+        # Track which local indices actually have solver answers
+        solver_answer_indices: Dict[int, List[int]] = {}
 
         for q_idx, (q, items) in enumerate(q_items):
             n = len(items)
+
+            # Determine which rubric indices get solver answers
+            if solver_n > 0 and n > solver_n:
+                # Randomly select solver_n out of n rubrics for answer generation
+                selected = sorted(random.sample(range(n), solver_n))
+            else:
+                selected = list(range(n))
+            solver_answer_indices[q_idx] = selected
+
             with progress_lock:
-                progress["solver_total"] += n
+                progress["solver_total"] += len(selected)
 
             if n < 2:
                 idx0, r0 = items[0]
@@ -231,7 +247,8 @@ class MetaRewardFunction:
                 solver_futures[q_idx] = [(0, fut)]
             else:
                 futs = []
-                for local_i, (_, rubric) in enumerate(items):
+                for local_i in selected:
+                    _, rubric = items[local_i]
                     fut = solver_pool.submit(_gen_answer, q, rubric)
                     futs.append((local_i, fut))
                 solver_futures[q_idx] = futs
@@ -245,43 +262,54 @@ class MetaRewardFunction:
 
         def _coordinate_question(q_idx: int, q: str, items: List[Tuple[int, str]], n: int):
             """Wait for solver results, then submit K-sparse oracle evals."""
-            # Collect answers in order
-            answers = [""] * n
+            # Collect answers for indices that have solver answers
+            has_answer = set(solver_answer_indices[q_idx])
+            answers = {}  # local_i -> answer text
             for local_i, fut in solver_futures[q_idx]:
                 try:
                     answers[local_i] = fut.result(timeout=900)
                 except Exception as e:
                     print(f"[MetaReward] Solver error Q{q_idx} rubric {local_i}: {e}")
+                    answers[local_i] = ""
 
             if n < 2:
                 with progress_lock:
                     progress["eval_total"] += 1
                 fut = oracle_pool.submit(
-                    _eval_batch_by_rubric, q, [answers[0]], items[0][1]
+                    _eval_batch_by_rubric, q, [answers.get(0, "")], items[0][1]
                 )
                 eval_futures[q_idx] = [("single", fut)]
                 eval_sets_per_q[q_idx] = [[0]]
                 return
 
-            # K-sparse selection
+            # Build ordered list of answer indices that exist
+            answer_keys = sorted(answers.keys())
+            n_answers = len(answer_keys)
+
+            # For cross-evaluation: each rubric j evaluates all available answers
+            # (K-sparse applies to which rubrics evaluate, not which answers)
             eval_sets = _select_rubric_indices(n, k_sparse)
             eval_sets_per_q[q_idx] = eval_sets
 
-            # Count total eval items for progress
-            total_evals = sum(len(es) for es in eval_sets)
-            with progress_lock:
-                progress["eval_total"] += total_evals
-
-            # Submit one batch call per rubric j, but only with selected answers
+            # For each rubric j, only evaluate answers that actually exist
+            total_evals = 0
             batch_futs = []
             for j in range(n):
-                answer_indices = eval_sets[j]
-                selected_answers = [answers[ai] for ai in answer_indices]
+                # Only use answer indices that exist (intersection with solver answers)
+                available = [ai for ai in answer_keys if ai != j]
+                if not available:
+                    # If the only answer is from this rubric, include it anyway
+                    available = answer_keys[:]
+                selected_answers = [answers[ai] for ai in available]
+                total_evals += len(selected_answers)
                 rubric_j = items[j][1]
                 fut = oracle_pool.submit(
                     _eval_batch_by_rubric, q, selected_answers, rubric_j
                 )
-                batch_futs.append((j, answer_indices, fut))
+                batch_futs.append((j, available, fut))
+
+            with progress_lock:
+                progress["eval_total"] += total_evals
             eval_futures[q_idx] = batch_futs
 
         for q_idx, (q, items) in enumerate(q_items):

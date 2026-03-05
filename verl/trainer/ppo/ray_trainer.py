@@ -1203,17 +1203,41 @@ class RayPPOTrainer:
             old_log_prob_mfu = 0
         return old_log_prob, old_log_prob_mfu
 
+    def _get_scheduled_entropy_coeff(self) -> float:
+        """Compute entropy coefficient with linear warmup decay schedule.
+
+        If entropy_warmup_steps is configured, linearly decay from
+        entropy_coeff (initial/max) → entropy_coeff_min over warmup_steps.
+        After warmup, hold at entropy_coeff_min.
+        """
+        actor_cfg = self.config.actor_rollout_ref.actor
+        entropy_coeff = float(getattr(actor_cfg, "entropy_coeff", 0.0))
+        entropy_coeff_min = float(getattr(actor_cfg, "entropy_coeff_min", entropy_coeff))
+        warmup_steps = int(getattr(actor_cfg, "entropy_warmup_steps", 0))
+
+        if warmup_steps <= 0 or entropy_coeff == entropy_coeff_min:
+            return entropy_coeff
+
+        progress = min(self.global_steps / warmup_steps, 1.0)
+        scheduled = entropy_coeff + (entropy_coeff_min - entropy_coeff) * progress
+        return scheduled
+
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
         # TODO: Make "temperature" single source of truth from generation.
         batch.meta_info["temperature"] = rollout_config.temperature
+
+        # Entropy coefficient scheduling: pass current value via meta_info
+        scheduled_entropy = self._get_scheduled_entropy_coeff()
+        batch.meta_info["entropy_coeff"] = scheduled_entropy
+
         # update actor
         if self.use_legacy_worker_impl == "disable":
             batch_td = batch.to_tensordict()
             # step 2: convert from padding to no-padding
             batch_td = left_right_2_no_padding(batch_td)
-            calculate_entropy = self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
+            calculate_entropy = scheduled_entropy != 0.0
             ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
             ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
             ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs

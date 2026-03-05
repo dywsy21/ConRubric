@@ -457,6 +457,9 @@ class DataParallelPPOActor(BasePPOActor):
                     advantages = model_inputs["advantages"]
 
                     entropy_coeff = self.config.entropy_coeff
+                    # Override with scheduled entropy_coeff from meta_info if present
+                    if "entropy_coeff" in micro_batch.meta_info:
+                        entropy_coeff = micro_batch.meta_info["entropy_coeff"]
                     loss_agg_mode = self.config.loss_agg_mode
 
                     calculate_entropy = self.config.calculate_entropy or (entropy_coeff != 0)
