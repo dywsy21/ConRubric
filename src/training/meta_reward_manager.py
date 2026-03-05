@@ -18,35 +18,39 @@ def _is_garbage_rubric(text: str) -> bool:
     """Detect garbage / degenerate rubrics that should receive reward=0.
 
     Criteria (any → garbage):
-      1. Near-empty: fewer than 20 non-whitespace characters.
-      2. Repetitive character spam: a single character repeated 5+ times in a
-         row dominates > 40 % of the text (e.g. "||||||||" or "------").
-      3. No parseable criteria: no lines starting with bullets (*/-), numbered
-         lists (1./1)), or headers (#).
-      4. Extremely low character diversity: unique chars / len < 0.05 (after
+      1. Near-empty: fewer than 50 non-whitespace characters.
+      2. Repetitive character spam: a single character repeated 10+ times in a
+         row dominates > 60 % of the text (e.g. "||||||||||||" or "----------").
+      3. No parseable criteria: no bullet points (*/-), numbered lists, or
+         point markers like [+10], [-5], [criterion], etc.
+      4. Extremely low character diversity: unique chars / len < 0.03 (after
          collapsing whitespace).
     """
     stripped = text.strip()
 
     # 1. Too short to be a real rubric
     non_ws = re.sub(r"\s", "", stripped)
-    if len(non_ws) < 20:
+    if len(non_ws) < 50:
         return True
 
-    # 2. Repetitive single-char runs
-    runs = re.findall(r"(.)\1{4,}", stripped)  # char repeated 5+ times
-    total_run_len = sum(len(m) * 5 for m in runs)  # lower-bound estimate
-    if total_run_len > 0.4 * len(stripped):
+    # 2. Repetitive single-char spam (very generous threshold)
+    runs = re.findall(r"(.)\1{9,}", stripped)  # char repeated 10+ times
+    total_run_len = sum(len(m) for m in runs)
+    if total_run_len > 0.6 * len(stripped):
         return True
 
-    # 3. No parseable criterion markers
+    # 3. No parseable criterion markers - be very permissive
+    # Accept: bullets, numbers, point markers like [+10], [-5], [criterion X], etc.
     has_criterion = bool(re.search(
-        r"^[\s]*(?:[-*•]|\d+[.)\]]|#{1,3}\s)",
+        r"(?:[-*•]\s*\[?[+-]?\d|^\d+[\.\)]|\[criterion|points:|score:|rubric:)",
         stripped,
-        re.MULTILINE,
+        re.IGNORECASE | re.MULTILINE,
     ))
     if not has_criterion:
-        # Also accept lines with "criterion" / "points" / "score" keywords
+        # Fallback: look for any bracketed point value
+        has_criterion = bool(re.search(r"\[[+-]\d+\]", stripped))
+    if not has_criterion:
+        # Final fallback: any line with "criterion" or "points" keyword
         has_criterion = bool(re.search(
             r"(?:criterion|points|score|rubric)",
             stripped,
@@ -55,9 +59,9 @@ def _is_garbage_rubric(text: str) -> bool:
     if not has_criterion:
         return True
 
-    # 4. Very low character diversity
+    # 4. Very low character diversity (extremely permissive)
     unique_chars = len(set(non_ws.lower()))
-    if unique_chars / max(len(non_ws), 1) < 0.05:
+    if unique_chars / max(len(non_ws), 1) < 0.03:
         return True
 
     return False
@@ -153,9 +157,14 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         n_garbage = sum(garbage_mask)
         if n_garbage:
             print(f"[RewardManager] Detected {n_garbage}/{batch_size} garbage rubrics → reward=0")
+            # Print first 3 garbage samples for debugging
             for i, is_garb in enumerate(garbage_mask):
-                if is_garb:
-                    print(f"  [garbage {i}] {rubrics[i][:120]!r}...")
+                if is_garb and i < 3:
+                    print(f"  [garbage {i}] {rubrics[i][:200]!r}...")
+        else:
+            # Print first valid rubric as sanity check
+            print(f"[RewardManager] All {batch_size} rubrics passed quality check")
+            print(f"  [sample] {rubrics[0][:200]!r}...")
 
         # Build filtered lists for non-garbage rubrics
         valid_indices = [i for i, g in enumerate(garbage_mask) if not g]
