@@ -524,8 +524,14 @@ class DataParallelPPOActor(BasePPOActor):
                     if calculate_entropy and entropy is not None:
                         entropy_agg = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
                         micro_batch_metrics["actor/entropy"] = entropy_agg.detach().item()
-                        if entropy_coeff != 0:
-                            policy_loss -= entropy_agg * entropy_coeff
+                        # Entropy cap: if observed entropy exceeds cap, zero out entropy bonus
+                        entropy_cap = getattr(self.config, "entropy_cap", 0.0)
+                        if entropy_cap > 0 and entropy_agg.detach().item() > entropy_cap:
+                            effective_entropy_coeff = 0.0
+                        else:
+                            effective_entropy_coeff = entropy_coeff
+                        if effective_entropy_coeff != 0:
+                            policy_loss -= entropy_agg * effective_entropy_coeff
 
                     if self.config.use_kl_loss:
                         ref_log_prob = model_inputs["ref_log_prob"]

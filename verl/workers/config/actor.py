@@ -146,6 +146,7 @@ class ActorConfig(BaseConfig):
     entropy_coeff: float = 0
     entropy_coeff_min: float = 0        # floor for entropy scheduling (0 = no scheduling)
     entropy_warmup_steps: int = 0       # decay from entropy_coeff → entropy_coeff_min over this many steps
+    entropy_cap: float = 0.0            # when observed entropy > cap, stop entropy bonus (0 = disabled)
     tau_pos: float = 1.0
     tau_neg: float = 1.05
     calculate_entropy: bool = False
