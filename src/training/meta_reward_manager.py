@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 from typing import Any
 
@@ -12,40 +11,6 @@ from verl.workers.reward_manager.abstract import AbstractRewardManager
 from verl.workers.reward_manager.registry import REWARD_MANAGER_REGISTRY
 
 print("Imported meta_reward_manager.py")
-
-
-def _is_garbage_rubric(text: str) -> bool:
-    """Fast pre-filter for truly degenerate rubrics (reward → 0).
-
-    Only catches extreme cases — real garbage detection is delegated to the
-    Solver model, which outputs <GARBAGE_RUBRIC> when it receives nonsensical
-    input.
-
-    Criteria (any → garbage):
-      1. Near-empty: fewer than 20 non-whitespace characters.
-      2. Repetitive character spam: a single character repeated 10+ times in a
-         row dominates > 60 % of the text.
-      3. Extremely low character diversity: unique chars / len < 0.03.
-    """
-    stripped = text.strip()
-
-    # 1. Near-empty
-    non_ws = re.sub(r"\s", "", stripped)
-    if len(non_ws) < 20:
-        return True
-
-    # 2. Repetitive single-char spam
-    runs = re.findall(r"(.)\1{9,}", stripped)  # char repeated 10+ times
-    total_run_len = sum(len(m) for m in runs)
-    if total_run_len > 0.6 * len(stripped):
-        return True
-
-    # 3. Extremely low character diversity
-    unique_chars = len(set(non_ws.lower()))
-    if unique_chars / max(len(non_ws), 1) < 0.03:
-        return True
-
-    return False
 
 
 class MetaConsensusRewardManager(AbstractRewardManager):
@@ -130,32 +95,10 @@ class MetaConsensusRewardManager(AbstractRewardManager):
             rubrics.append(response_str)
             valid_response_lengths.append(max(valid_response_len, 1))
 
-        # ── Garbage rubric pre-filter ──────────────────────────────────
-        # Fast pre-filter catches only truly degenerate rubrics (empty, spam).
-        # Real garbage detection is delegated to the Solver model, which
+        # All garbage detection is delegated to the Solver model, which
         # outputs <GARBAGE_RUBRIC> when it receives a nonsensical rubric.
-        garbage_mask = [_is_garbage_rubric(r) for r in rubrics]
-        n_garbage = sum(garbage_mask)
-        if n_garbage:
-            print(f"[RewardManager] Pre-filter: {n_garbage}/{batch_size} degenerate rubrics → reward=0")
-            for i, is_garb in enumerate(garbage_mask):
-                if is_garb:
-                    print(f"  [pre-filter {i}] len={len(rubrics[i].strip())} {rubrics[i][:80]!r}...")
-
-        # Build filtered lists for non-garbage rubrics
-        valid_indices = [i for i, g in enumerate(garbage_mask) if not g]
-
-        if valid_indices:
-            valid_questions = [questions[i] for i in valid_indices]
-            valid_rubrics = [rubrics[i] for i in valid_indices]
-            valid_scalar_rewards = self.reward_fn.compute_reward(valid_questions, valid_rubrics)
-        else:
-            valid_scalar_rewards = torch.tensor([])
-
-        # Merge back: garbage → 0, valid → computed reward
-        scalar_rewards = torch.zeros(batch_size, dtype=torch.float32)
-        for out_idx, orig_idx in enumerate(valid_indices):
-            scalar_rewards[orig_idx] = valid_scalar_rewards[out_idx]
+        # See meta_reward.py _coordinate_question() for the detection logic.
+        scalar_rewards = self.reward_fn.compute_reward(questions, rubrics)
 
         for i, score in enumerate(scalar_rewards):
             rewards[i, valid_response_lengths[i] - 1] = float(score)
