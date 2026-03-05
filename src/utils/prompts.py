@@ -23,8 +23,12 @@ You are a helpful assistant. Please answer the following question.
 Question:
 {question}
 
-Please ensure your answer follows these principles:
+Please ensure your answer follows these evaluation rubric:
 {rubric}
+
+IMPORTANT: If the rubric above is garbled, nonsensical, repetitive garbage, or completely unrelated to the question, respond with exactly:
+<GARBAGE_RUBRIC>
+Otherwise, answer the question normally.
 
 Answer:
 """

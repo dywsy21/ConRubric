@@ -34,6 +34,9 @@ MC_REG = float(os.environ.get("GRM_MC_REG", "0.1"))
 # Rubric quality scoring
 RUBRIC_QUALITY_CONFIG = RubricQualityConfig()
 
+# Marker the solver outputs when it detects a garbage rubric
+GARBAGE_RUBRIC_MARKER = "<GARBAGE_RUBRIC>"
+
 class MetaRewardFunction:
     def __init__(self, solver_model_name: str, oracle_model_name: str, 
                  oracle_api_key: str = None, oracle_api_base: str = None,
@@ -260,6 +263,9 @@ class MetaRewardFunction:
         coordinator_futures: List[Future] = []
         coordinator_pool = ThreadPoolExecutor(max_workers=len(q_items))
 
+        # Track solver-detected garbage rubrics per question
+        solver_garbage: Dict[int, set] = {}  # q_idx -> set of local indices flagged garbage
+
         def _coordinate_question(q_idx: int, q: str, items: List[Tuple[int, str]], n: int):
             """Wait for solver results, then submit K-sparse oracle evals."""
             # Collect answers for indices that have solver answers
@@ -272,7 +278,26 @@ class MetaRewardFunction:
                     print(f"[MetaReward] Solver error Q{q_idx} rubric {local_i}: {e}")
                     answers[local_i] = ""
 
+            # ── Solver-based garbage detection ─────────────────────────
+            # If the solver output contains <GARBAGE_RUBRIC>, the rubric was
+            # nonsensical.  Remove those answers so they don't pollute the
+            # cross-evaluation; their reward will be set to 0 in Phase 3.
+            garbage_local = set()
+            for local_i, ans in list(answers.items()):
+                if GARBAGE_RUBRIC_MARKER in ans:
+                    garbage_local.add(local_i)
+                    del answers[local_i]
+            if garbage_local:
+                print(f"[MetaReward] Q{q_idx}: solver flagged {len(garbage_local)}/{n} "
+                      f"rubrics as garbage (indices {sorted(garbage_local)})")
+            solver_garbage[q_idx] = garbage_local
+
             if n < 2:
+                if 0 in garbage_local:
+                    # Single rubric flagged garbage — skip oracle entirely
+                    eval_futures[q_idx] = []
+                    eval_sets_per_q[q_idx] = []
+                    return
                 with progress_lock:
                     progress["eval_total"] += 1
                 fut = oracle_pool.submit(
@@ -282,8 +307,13 @@ class MetaRewardFunction:
                 eval_sets_per_q[q_idx] = [[0]]
                 return
 
-            # Build ordered list of answer indices that exist
+            # Build ordered list of non-garbage answer indices
             answer_keys = sorted(answers.keys())
+            if not answer_keys:
+                # All answers were garbage — skip oracle entirely
+                eval_futures[q_idx] = []
+                eval_sets_per_q[q_idx] = []
+                return
             n_answers = len(answer_keys)
 
             # For cross-evaluation: each rubric j evaluates all available answers
@@ -291,14 +321,16 @@ class MetaRewardFunction:
             eval_sets = _select_rubric_indices(n, k_sparse)
             eval_sets_per_q[q_idx] = eval_sets
 
-            # For each rubric j, only evaluate answers that actually exist
+            # For each rubric j, only evaluate non-garbage answers
             total_evals = 0
             batch_futs = []
             for j in range(n):
-                # Only use answer indices that exist (intersection with solver answers)
+                if j in garbage_local:
+                    # Garbage rubric — don't use it as evaluator either
+                    continue
+                # Only use answer indices that exist and aren't garbage
                 available = [ai for ai in answer_keys if ai != j]
                 if not available:
-                    # If the only answer is from this rubric, include it anyway
                     available = answer_keys[:]
                 selected_answers = [answers[ai] for ai in available]
                 total_evals += len(selected_answers)
@@ -325,17 +357,23 @@ class MetaRewardFunction:
             indices = [it[0] for it in items]  # global indices
             n = len(items)
 
+            # Solver-detected garbage indices for this question
+            q_garbage = solver_garbage.get(q_idx, set())
+
             if n < 2:
-                tag, fut = eval_futures[q_idx][0]
-                try:
-                    scores = fut.result(timeout=900)
-                    consensus_reward = scores[0] if scores else 0.0
-                except Exception as e:
-                    print(f"[MetaReward] Eval error Q{q_idx}: {e}")
-                    consensus_reward = 0.0
-                # Combined reward
-                qa = quality_adjustments[indices[0]] if RUBRIC_QUALITY_CONFIG.enabled else 0.0
-                rewards[indices[0]] = consensus_reward + qa
+                if not eval_futures.get(q_idx):
+                    # Garbage or no eval — reward stays 0
+                    pass
+                else:
+                    tag, fut = eval_futures[q_idx][0]
+                    try:
+                        scores = fut.result(timeout=900)
+                        consensus_reward = scores[0] if scores else 0.0
+                    except Exception as e:
+                        print(f"[MetaReward] Eval error Q{q_idx}: {e}")
+                        consensus_reward = 0.0
+                    qa = quality_adjustments[indices[0]] if RUBRIC_QUALITY_CONFIG.enabled else 0.0
+                    rewards[indices[0]] = consensus_reward + qa
             else:
                 # Build sparse score matrix
                 score_matrix = np.full((n, n), np.nan)
@@ -378,6 +416,11 @@ class MetaRewardFunction:
 
                 # Compute cross-consensus reward per rubric
                 for i in range(n):
+                    # Solver-flagged garbage → reward=0 (no adjustment)
+                    if i in q_garbage:
+                        rewards[indices[i]] = 0.0
+                        continue
+
                     if use_mc and mask.sum() < n * n:
                         # With MC: use all off-diagonal entries from completed matrix
                         off_diag = [reward_matrix[i][j] for j in range(n) if j != i]

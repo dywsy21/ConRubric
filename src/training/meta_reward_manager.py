@@ -158,20 +158,17 @@ class MetaConsensusRewardManager(AbstractRewardManager):
             rubrics.append(response_str)
             valid_response_lengths.append(max(valid_response_len, 1))
 
-        # ── Garbage rubric detection ───────────────────────────────────
-        # Detect degenerate rubrics BEFORE calling the expensive solver/oracle
-        # pipeline. Garbage rubrics get reward=0 immediately; only valid
-        # rubrics are passed to compute_reward().
-        garbage_mask = []
-        for i, r in enumerate(rubrics):
-            is_garb = _is_garbage_rubric(r, debug=(i < 3))
-            garbage_mask.append(is_garb)
-        
+        # ── Garbage rubric pre-filter ──────────────────────────────────
+        # Fast pre-filter catches only truly degenerate rubrics (empty, spam).
+        # Real garbage detection is delegated to the Solver model, which
+        # outputs <GARBAGE_RUBRIC> when it receives a nonsensical rubric.
+        garbage_mask = [_is_garbage_rubric(r) for r in rubrics]
         n_garbage = sum(garbage_mask)
         if n_garbage:
-            print(f"[RewardManager] Detected {n_garbage}/{batch_size} garbage rubrics → reward=0")
-        else:
-            print(f"[RewardManager] All {batch_size} rubrics passed quality check")
+            print(f"[RewardManager] Pre-filter: {n_garbage}/{batch_size} degenerate rubrics → reward=0")
+            for i, is_garb in enumerate(garbage_mask):
+                if is_garb:
+                    print(f"  [pre-filter {i}] len={len(rubrics[i].strip())} {rubrics[i][:80]!r}...")
 
         # Build filtered lists for non-garbage rubrics
         valid_indices = [i for i, g in enumerate(garbage_mask) if not g]
