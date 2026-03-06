@@ -117,7 +117,13 @@ class Solver:
                     model=self.model_name,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.7,
-                    max_tokens=512
+                    top_p=0.8,
+                    presence_penalty=1.5,
+                    max_tokens=512,
+                    extra_body={
+                        "chat_template_kwargs": {"enable_thinking": False},
+                        "top_k": 20,
+                    },
                 )
                 return response.choices[0].message.content
             except (httpx.TimeoutException, httpx.ReadTimeout, Exception) as e:

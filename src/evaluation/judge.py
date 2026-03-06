@@ -124,11 +124,16 @@ class Judge:
                     model=self.model_name,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=temperature,
+                    top_p=0.8,
+                    presence_penalty=1.5,
                 )
                 if max_tokens is not None:
                     kwargs["max_tokens"] = max_tokens
+                # Merge top_k into extra_body for Qwen3.5 instruct mode
+                eb = {"top_k": 20}
                 if extra_body is not None:
-                    kwargs["extra_body"] = extra_body
+                    eb.update(extra_body)
+                kwargs["extra_body"] = eb
                 
                 response = self.client.chat.completions.create(**kwargs)
                 return response.choices[0].message.content
