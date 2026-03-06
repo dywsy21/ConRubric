@@ -34,6 +34,13 @@ class RubricQualityConfig:
     min_criteria: int = int(os.getenv("GRM_MIN_CRITERIA", "3"))
     max_criteria: int = int(os.getenv("GRM_MAX_CRITERIA", "15"))
 
+    # Token-level length penalty: penalizes rubrics exceeding token_soft_max tokens.
+    # penalty = -lambda_token_len * ((tokens - soft_max) / (hard_max - soft_max))^2
+    # Quadratic ramp: gentle near soft_max, harsh as tokens approach hard_max.
+    lambda_token_len: float = float(os.getenv("GRM_LAMBDA_TOKEN_LEN", "1.5"))
+    token_soft_max: int = int(os.getenv("GRM_TOKEN_SOFT_MAX", "700"))
+    token_hard_max: int = int(os.getenv("GRM_TOKEN_HARD_MAX", "1024"))
+
     # Similarity threshold for duplicate detection (Jaccard on 3-gram sets)
     similarity_threshold: float = float(os.getenv("GRM_SIM_THRESHOLD", "0.55"))
 
@@ -158,6 +165,7 @@ class RubricQualityResult:
     n_duplicates: int
     has_negative: bool
     is_truncated: bool
+    token_count: int  # actual token count of the rubric (0 if not provided)
     total_adjustment: float
     detail: Dict[str, float]  # component → value
 
@@ -165,6 +173,7 @@ class RubricQualityResult:
 def score_rubric_quality(
     rubric_text: str,
     config: Optional[RubricQualityConfig] = None,
+    token_count: int = 0,
 ) -> RubricQualityResult:
     """Compute a reward adjustment for rubric structural quality.
 
@@ -225,7 +234,21 @@ def score_rubric_quality(
     trunc_penalty = -0.1 if is_truncated else 0.0
     detail["truncation_penalty"] = trunc_penalty
 
-    total = rep_penalty + div_bonus + len_penalty + trunc_penalty
+    # ── 5. Token-level length penalty ──────────────────────────────────
+    # Quadratic penalty for rubrics exceeding token_soft_max tokens.
+    # Ramps from 0 at soft_max to -lambda_token_len at hard_max.
+    if token_count > config.token_soft_max:
+        excess_ratio = min(
+            (token_count - config.token_soft_max)
+            / max(config.token_hard_max - config.token_soft_max, 1),
+            1.0,
+        )
+        token_len_penalty = -config.lambda_token_len * (excess_ratio ** 2)
+    else:
+        token_len_penalty = 0.0
+    detail["token_length_penalty"] = token_len_penalty
+
+    total = rep_penalty + div_bonus + len_penalty + trunc_penalty + token_len_penalty
 
     return RubricQualityResult(
         n_criteria=n,
@@ -234,6 +257,7 @@ def score_rubric_quality(
         n_duplicates=n_dup,
         has_negative=has_neg,
         is_truncated=is_truncated,
+        token_count=token_count,
         total_adjustment=total,
         detail=detail,
     )

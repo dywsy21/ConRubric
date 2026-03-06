@@ -108,7 +108,8 @@ class MetaRewardFunction:
     def compute_reward(self, questions: List[str], rubrics: List[str],
                        solver_workers: int = None,
                        oracle_workers: int = None,
-                       global_step: int = None) -> torch.Tensor:
+                       global_step: int = None,
+                       response_token_counts: Optional[List[int]] = None) -> torch.Tensor:
         """
         Computes the Consensus-Based Meta-Reward with pipelined execution,
         K-sparse cross-evaluation, optional matrix completion, and rubric
@@ -159,8 +160,12 @@ class MetaRewardFunction:
         quality_adjustments = np.zeros(len(questions), dtype=np.float32)
         if RUBRIC_QUALITY_CONFIG.enabled:
             for idx, rubric in enumerate(rubrics):
-                result = score_rubric_quality(rubric, RUBRIC_QUALITY_CONFIG)
+                tc = response_token_counts[idx] if response_token_counts else 0
+                result = score_rubric_quality(rubric, RUBRIC_QUALITY_CONFIG, token_count=tc)
                 quality_adjustments[idx] = result.total_adjustment
+                if result.detail.get("token_length_penalty", 0.0) < -0.01:
+                    print(f"[MetaReward]   rubric {idx}: {tc} tokens, "
+                          f"token_len_penalty={result.detail['token_length_penalty']:.3f}")
 
         # Per-question answer storage for rollout logging
         question_answers: Dict[int, Dict[int, str]] = {}  # q_idx -> {local_i -> answer}
@@ -468,10 +473,13 @@ class MetaRewardFunction:
         self._log_sample_rubrics(q_items, rewards)
 
         # ── Rollout logging ────────────────────────────────────────
+        # Use global_step directly for correct file naming across resumes.
+        # Fallback to internal counter only when global_step is unavailable.
+        log_step = global_step if global_step is not None else self._step_counter
         if global_step is None:
             self._step_counter += 1
         self._save_rollout_log(
-            step=self._step_counter,
+            step=log_step,
             q_items=q_items,
             question_answers=question_answers,
             rewards=rewards,

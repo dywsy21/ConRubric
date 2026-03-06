@@ -42,7 +42,7 @@ actor_rollout_ref:
     ppo_mini_batch_size: 8
     ppo_micro_batch_size_per_gpu: 2
     ppo_max_token_len_per_gpu: 8192
-    ppo_epochs: 1
+    ppo_epochs: 3
     shuffle: False
     use_dynamic_bsz: False
     # Entropy warmup: start high, decay to min over warmup_steps.
@@ -61,7 +61,7 @@ actor_rollout_ref:
     kl_loss_coef: 0.01              # Relaxed KL penalty (0.02→0.01) for more exploration
     kl_loss_type: low_var_kl        # Lower-variance KL estimator
     optim:
-      lr: 5e-6
+      lr: 1e-5
       lr_warmup_steps_ratio: 0.05   # 5% warmup (constant schedule with warmup)
       min_lr_ratio: 1.0
       weight_decay: 0.01

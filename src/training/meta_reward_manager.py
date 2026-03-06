@@ -110,7 +110,11 @@ class MetaConsensusRewardManager(AbstractRewardManager):
                     if global_step is not None:
                         break
         print(f"[RewardManager] global_step={global_step}, meta_info keys={list(data.meta_info.keys()) if hasattr(data, 'meta_info') and data.meta_info else 'N/A'}")
-        scalar_rewards = self.reward_fn.compute_reward(questions, rubrics, global_step=global_step)
+        scalar_rewards = self.reward_fn.compute_reward(
+            questions, rubrics,
+            global_step=global_step,
+            response_token_counts=valid_response_lengths,
+        )
 
         for i, score in enumerate(scalar_rewards):
             rewards[i, valid_response_lengths[i] - 1] = float(score)
