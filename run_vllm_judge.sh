@@ -13,7 +13,14 @@ set -euo pipefail
 # ═══════════════════════════════════════════════════════════════
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$ROOT_DIR/.venv/bin/activate"
+
+# Use dedicated judge venv with vLLM 0.16+ (supports Qwen3.5)
+JUDGE_VENV="${JUDGE_VENV:-$ROOT_DIR/.venv_judge}"
+if [[ -d "$JUDGE_VENV" ]]; then
+  source "$JUDGE_VENV/bin/activate"
+else
+  source "$ROOT_DIR/.venv/bin/activate"
+fi
 
 # Load .env
 if [[ -f "$ROOT_DIR/.env" ]]; then
@@ -23,13 +30,19 @@ fi
 # Configurable via env
 GPU="${JUDGE_GPU:-1}"
 PORT="${JUDGE_PORT:-8202}"
-MODEL="${JUDGE_MODEL:-models/Qwen3-4B}"
-MODEL_NAME="${JUDGE_SERVED_NAME:-qwen3-4b}"
-MAX_MODEL_LEN="${JUDGE_MAX_MODEL_LEN:-4096}"
+MODEL="${JUDGE_MODEL:-models/Qwen3.5-35B-A3B}"
+MODEL_NAME="${JUDGE_SERVED_NAME:-qwen3.5-35b-a3b}"
+MAX_MODEL_LEN="${JUDGE_MAX_MODEL_LEN:-8192}"
 GPU_MEM_UTIL="${JUDGE_GPU_MEM_UTIL:-0.9}"
+LANG_ONLY="${JUDGE_LANG_ONLY:-1}"  # Qwen3.5 is multimodal; use --language-model-only for text
 
 echo "[vllm-judge] GPU=$GPU  PORT=$PORT  MODEL=$MODEL  NAME=$MODEL_NAME"
-echo "[vllm-judge] max_model_len=$MAX_MODEL_LEN  gpu_memory_utilization=$GPU_MEM_UTIL"
+echo "[vllm-judge] max_model_len=$MAX_MODEL_LEN  gpu_memory_utilization=$GPU_MEM_UTIL  lang_only=$LANG_ONLY"
+
+EXTRA_ARGS=()
+if [[ "$LANG_ONLY" == "1" ]]; then
+  EXTRA_ARGS+=(--language-model-only)
+fi
 
 CUDA_VISIBLE_DEVICES="$GPU" python -m vllm.entrypoints.openai.api_server \
   --model "$MODEL" \
@@ -38,4 +51,5 @@ CUDA_VISIBLE_DEVICES="$GPU" python -m vllm.entrypoints.openai.api_server \
   --max-model-len "$MAX_MODEL_LEN" \
   --gpu-memory-utilization "$GPU_MEM_UTIL" \
   --dtype bfloat16 \
+  "${EXTRA_ARGS[@]}" \
   2>&1 | tee vllm-judge.log
