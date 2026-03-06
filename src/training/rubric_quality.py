@@ -38,8 +38,14 @@ class RubricQualityConfig:
     # penalty = -lambda_token_len * ((tokens - soft_max) / (hard_max - soft_max))^2
     # Quadratic ramp: gentle near soft_max, harsh as tokens approach hard_max.
     lambda_token_len: float = float(os.getenv("GRM_LAMBDA_TOKEN_LEN", "1.5"))
-    token_soft_max: int = int(os.getenv("GRM_TOKEN_SOFT_MAX", "700"))
+    token_soft_max: int = int(os.getenv("GRM_TOKEN_SOFT_MAX", "900"))
     token_hard_max: int = int(os.getenv("GRM_TOKEN_HARD_MAX", "1024"))
+
+    # Point diversity bonus: encourages rubrics with varied point values
+    # (e.g., +5, +3, -2, -4 rather than all +3).
+    # bonus = lambda * min((n_unique_points - 1) / (target - 1), 1.0)
+    lambda_point_div: float = float(os.getenv("GRM_LAMBDA_POINT_DIV", "0.3"))
+    target_unique_points: int = int(os.getenv("GRM_TARGET_UNIQUE_POINTS", "5"))
 
     # Similarity threshold for duplicate detection (Jaccard on 3-gram sets)
     similarity_threshold: float = float(os.getenv("GRM_SIM_THRESHOLD", "0.55"))
@@ -248,7 +254,20 @@ def score_rubric_quality(
         token_len_penalty = 0.0
     detail["token_length_penalty"] = token_len_penalty
 
-    total = rep_penalty + div_bonus + len_penalty + trunc_penalty + token_len_penalty
+    # ── 6. Point diversity bonus ───────────────────────────────────
+    # Encourage rubrics with varied point values across criteria.
+    # More unique point values (e.g., +5, +3, +1, -2, -5) → higher bonus.
+    unique_points = set(c.points for c in criteria)
+    n_unique = len(unique_points)
+    if n_unique >= 2 and config.target_unique_points > 1:
+        point_div_bonus = config.lambda_point_div * min(
+            (n_unique - 1) / (config.target_unique_points - 1), 1.0
+        )
+    else:
+        point_div_bonus = 0.0
+    detail["point_diversity_bonus"] = point_div_bonus
+
+    total = rep_penalty + div_bonus + len_penalty + trunc_penalty + token_len_penalty + point_div_bonus
 
     return RubricQualityResult(
         n_criteria=n,
