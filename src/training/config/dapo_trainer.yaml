@@ -25,6 +25,8 @@ data:
   train_max_samples: -1
   val_max_samples: -1
   trust_remote_code: True
+  apply_chat_template_kwargs:
+    enable_thinking: false          # Disable Qwen3 <think> reasoning for rubric generation
 
 actor_rollout_ref:
   model:
