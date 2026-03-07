@@ -26,8 +26,7 @@ Question:
 Please ensure your answer follows these evaluation rubric:
 {rubric}
 
-IMPORTANT: If the rubric above is garbled, nonsensical, repetitive garbage, or completely unrelated to the question, respond with exactly:
-<GARBAGE_RUBRIC>
+IMPORTANT: If the rubric above is garbled, nonsensical, repetitive garbage, or completely unrelated to the question, begin your response with the marker <GARBAGE_RUBRIC> on its own line, then still answer the question to the best of your ability.
 Otherwise, answer the question normally.
 
 Answer:

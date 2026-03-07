@@ -39,6 +39,11 @@ RUBRIC_QUALITY_CONFIG = RubricQualityConfig()
 # Marker the solver outputs when it detects a garbage rubric
 GARBAGE_RUBRIC_MARKER = "<GARBAGE_RUBRIC>"
 
+# Weight penalty for garbage rubrics:
+# - Garbage rubric's own reward = normal_reward / w
+# - When garbage rubric evaluates others, its scores get weight 1/w
+GARBAGE_RUBRIC_WEIGHT = float(os.environ.get("GRM_GARBAGE_RUBRIC_WEIGHT", "2"))
+
 # Rollout logging directory
 ROLLOUT_LOG_DIR = os.environ.get("GRM_ROLLOUT_LOG_DIR", "out/rl/rollout_logs")
 
@@ -312,16 +317,25 @@ class MetaRewardFunction:
 
             # ── Solver-based garbage detection ─────────────────────────
             # If the solver output contains <GARBAGE_RUBRIC>, the rubric was
-            # nonsensical.  Remove those answers so they don't pollute the
-            # cross-evaluation; their reward will be set to 0 in Phase 3.
+            # nonsensical.  Strip the marker but KEEP the answer for evaluation.
+            # Garbage rubrics get penalised reward (÷w) and their evaluations
+            # of others are down-weighted (weight 1/w).
             garbage_local = set()
             for local_i, ans in list(answers.items()):
                 if GARBAGE_RUBRIC_MARKER in ans:
                     garbage_local.add(local_i)
-                    del answers[local_i]
+                    # Strip the marker, keep the actual answer
+                    cleaned = ans.replace(GARBAGE_RUBRIC_MARKER, "").strip()
+                    if cleaned:
+                        answers[local_i] = cleaned
+                    else:
+                        # Solver only output the marker with no answer — remove
+                        del answers[local_i]
             if garbage_local:
+                n_kept = len([i for i in garbage_local if i in answers])
                 print(f"[MetaReward] Q{q_idx}: solver flagged {len(garbage_local)}/{n} "
-                      f"rubrics as garbage (indices {sorted(garbage_local)})")
+                      f"rubrics as garbage (indices {sorted(garbage_local)}, "
+                      f"{n_kept} kept with answer)")
             solver_garbage[q_idx] = garbage_local
 
             if n < 2:
@@ -353,14 +367,13 @@ class MetaRewardFunction:
             eval_sets = _select_rubric_indices(n, k_sparse)
             eval_sets_per_q[q_idx] = eval_sets
 
-            # For each rubric j, only evaluate non-garbage answers
+            # For each rubric j, evaluate available answers.
+            # Garbage rubrics ARE used as evaluators (their scores are
+            # down-weighted by 1/GARBAGE_RUBRIC_WEIGHT in Phase 3).
             total_evals = 0
             batch_futs = []
             for j in range(n):
-                if j in garbage_local:
-                    # Garbage rubric — don't use it as evaluator either
-                    continue
-                # Only use answer indices that exist and aren't garbage
+                # Only use answer indices that exist (garbage w/o answer excluded)
                 available = [ai for ai in answer_keys if ai != j]
                 if not available:
                     available = answer_keys[:]
@@ -446,22 +459,33 @@ class MetaRewardFunction:
                 else:
                     reward_matrix = observed
 
-                # Compute cross-consensus reward per rubric
+                # Compute cross-consensus reward per rubric (weighted by garbage status)
+                w = GARBAGE_RUBRIC_WEIGHT
                 for i in range(n):
-                    # Solver-flagged garbage → reward=0 (no adjustment)
-                    if i in q_garbage:
-                        rewards[indices[i]] = 0.0
-                        continue
-
                     if use_mc and mask.sum() < n * n:
                         # With MC: use all off-diagonal entries from completed matrix
-                        off_diag = [reward_matrix[i][j] for j in range(n) if j != i]
+                        entries = [(reward_matrix[i][j], j) for j in range(n) if j != i]
                     else:
                         # Without MC: use only observed off-diagonal entries
-                        off_diag = [reward_matrix[i][j]
-                                    for j in range(n)
-                                    if j != i and mask[i][j] > 0]
-                    consensus = sum(off_diag) / len(off_diag) if off_diag else 0.0
+                        entries = [(reward_matrix[i][j], j)
+                                   for j in range(n)
+                                   if j != i and mask[i][j] > 0]
+
+                    if entries:
+                        # Weighted average: garbage evaluators' scores get weight 1/w
+                        weighted_sum = 0.0
+                        weight_sum = 0.0
+                        for score_val, j in entries:
+                            wt = (1.0 / w) if j in q_garbage else 1.0
+                            weighted_sum += wt * score_val
+                            weight_sum += wt
+                        consensus = weighted_sum / weight_sum if weight_sum > 0 else 0.0
+                    else:
+                        consensus = 0.0
+
+                    # Garbage rubric's own reward is penalised by /w
+                    if i in q_garbage:
+                        consensus = consensus / w
 
                     # Add rubric quality adjustment
                     qa = quality_adjustments[indices[i]] if RUBRIC_QUALITY_CONFIG.enabled else 0.0

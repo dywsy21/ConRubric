@@ -58,7 +58,7 @@ actor_rollout_ref:
     clip_ratio_c: 3.0
     loss_agg_mode: token-mean
     use_kl_loss: True               # Enable KL loss to prevent policy drift from SFT
-    kl_loss_coef: 0.01              # Relaxed KL penalty (0.02→0.01) for more exploration
+    kl_loss_coef: 0.025             # KL penalty: 0.01→0.025 to constrain policy drift & entropy explosion
     kl_loss_type: low_var_kl        # Lower-variance KL estimator
     optim:
       lr: 5e-6
