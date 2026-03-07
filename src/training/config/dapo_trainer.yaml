@@ -44,7 +44,7 @@ actor_rollout_ref:
     ppo_mini_batch_size: 8
     ppo_micro_batch_size_per_gpu: 2
     ppo_max_token_len_per_gpu: 8192
-    ppo_epochs: 3
+    ppo_epochs: 2
     shuffle: False
     use_dynamic_bsz: False
     # Entropy warmup: start high, decay to min over warmup_steps.
@@ -52,7 +52,7 @@ actor_rollout_ref:
     entropy_coeff: 0.002
     entropy_coeff_min: 0.001        # floor after warmup
     entropy_warmup_steps: 50        # linear decay from entropy_coeff → entropy_coeff_min
-    entropy_cap: 2.0                # smooth scaling: bonus linearly decays to 0 at 2x cap (4.0)
+    entropy_cap: 1.5                # hard cutoff: zero bonus at cap, penalty above
     grad_clip: 1.0
     clip_ratio: 0.2
     clip_ratio_low: 0.2

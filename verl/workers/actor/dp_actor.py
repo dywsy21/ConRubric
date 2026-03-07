@@ -524,16 +524,15 @@ class DataParallelPPOActor(BasePPOActor):
                     if calculate_entropy and entropy is not None:
                         entropy_agg = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
                         micro_batch_metrics["actor/entropy"] = entropy_agg.detach().item()
-                        # Smooth entropy cap: linearly scale down entropy bonus when
-                        # observed entropy exceeds cap, and PENALIZE beyond 2x cap.
-                        # Linear scale: 1.0 at cap → 0.0 at 2x cap → -1.0 at 3x cap.
-                        # Clamped at -1.0 to prevent runaway penalty.
+                        # Entropy cap: full bonus below cap, zero at cap, penalty above.
+                        # Above cap the penalty grows linearly scaled 5x base coeff
+                        # so high entropy is actively pushed back down.
                         entropy_cap = getattr(self.config, "entropy_cap", 0.0)
                         observed_entropy = entropy_agg.detach().item()
                         if entropy_cap > 0 and observed_entropy > entropy_cap:
-                            # Linear decay from 1.0 at cap to 0.0 at 2*cap to -1.0 at 3*cap
-                            scale = max(-1.0, 1.0 - (observed_entropy - entropy_cap) / entropy_cap)
-                            effective_entropy_coeff = entropy_coeff * scale
+                            # Immediate cutoff + linear penalty above cap
+                            excess_ratio = (observed_entropy - entropy_cap) / entropy_cap
+                            effective_entropy_coeff = -entropy_coeff * 5.0 * excess_ratio
                         else:
                             effective_entropy_coeff = entropy_coeff
                         micro_batch_metrics["actor/entropy_coeff_effective"] = effective_entropy_coeff
