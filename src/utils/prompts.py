@@ -11,11 +11,17 @@ RUBRIC_GENERATION_PROMPT = (
     "Include BOTH positive criteria (what the answer should do) AND negative criteria "
     "(common mistakes or harmful behaviors to penalize). Do not repeat or paraphrase "
     "the same idea across multiple criteria.\n\n"
-    "IMPORTANT: Each criterion must be specific to THIS question. Do NOT write generic criteria like "
-    "\"provides clear and accurate information\" or \"shows empathy\" that could "
-    "apply to any question. Instead, tie every criterion to a concrete aspect of "
-    "the question (e.g., \"explains the role of A1C in diabetes monitoring\" or "
-    "\"warns against combining aspirin with blood thinners\").\n\n"
+    "RULES:\n"
+    "1. Every criterion must name a SPECIFIC fact, entity, or concept from the "
+    "question — something you could NOT copy-paste into a rubric for a different "
+    "question. Good: \"explains the role of A1C in diabetes monitoring\". "
+    "Bad: \"provides clear and accurate information\".\n"
+    "2. Do NOT start criteria with \"Models answer with …\" — this is a filler "
+    "pattern. Write criteria about the CONTENT of the answer, not the model's "
+    "tone or behavior.\n"
+    "3. Do NOT use generic quality/tone words as standalone criteria "
+    "(empathy, clarity, accuracy, compassion, supportive tone, actionable advice). "
+    "If tone matters, tie it to a specific concern from the question.\n\n"
     "Output each criterion on its own line in this format:\n"
     "- [+/-points] criterion | tags: ...\n\n"
     "Question:\n{question}"
@@ -39,7 +45,7 @@ These do NOT count as question-specific:
   - Abstract references: "the question", "the topic", "the user's situation", "the current topic"
   - Generic quality phrases: "clarity", "accuracy", "actionable advice", "empathy", "next steps"
 A criterion IS question-specific only if it names something you could NOT copy-paste unchanged into a rubric for a completely different question in the same field (e.g., it says "mammogram" or "parathyroid" or "aspirin dosage" or "A1C" — an actual subject term from the question).
-If NOT A SINGLE criterion in the entire rubric names the actual subject of the question, begin your response with the marker <GENERAL_RUBRIC> on its own line, then still answer the question following the rubric.
+If **NOT A SINGLE** criterion in the entire rubric names the actual subject of the question, begin your response with the marker <GENERAL_RUBRIC> on its own line, then still answer the question following the rubric.
 Otherwise, answer the question normally — do NOT flag rubrics where at least one criterion references the specific topic.
 
 Answer:
