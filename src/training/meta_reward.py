@@ -420,21 +420,10 @@ class MetaRewardFunction:
                     general_local.add(local_i)
                     answers[local_i] = ans.replace(GENERAL_RUBRIC_MARKER, "").strip()
 
-            # ── False-positive override: if rubric contains topic words ──
-            # The solver sometimes flags rubrics that DO contain topic-specific
-            # content.  Check keyword overlap and reverse the flag if found.
-            overridden = set()
-            if general_local:
-                for local_i in list(general_local):
-                    rubric_text = items[local_i][1]
-                    overlap = _has_topic_specificity(q, rubric_text)
-                    if overlap:
-                        overridden.add(local_i)
-                        general_local.discard(local_i)
-                if overridden:
-                    print(f"[MetaReward] Q{q_idx}: overrode generic flag for "
-                          f"{len(overridden)}/{len(overridden) + len(general_local)} "
-                          f"rubrics (topic words found)")
+            # ── False-positive override DISABLED ──
+            # The enhanced RUBRIC_GENERATION_PROMPT now enforces topic
+            # specificity directly, so we trust the solver's generic flag
+            # without second-guessing via keyword overlap.
 
             if general_local:
                 print(f"[MetaReward] Q{q_idx}: solver flagged {len(general_local)}/{n} "
