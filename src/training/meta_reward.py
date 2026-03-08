@@ -44,6 +44,14 @@ GARBAGE_RUBRIC_MARKER = "<GARBAGE_RUBRIC>"
 # - When garbage rubric evaluates others, its scores get weight 1/w
 GARBAGE_RUBRIC_WEIGHT = float(os.environ.get("GRM_GARBAGE_RUBRIC_WEIGHT", "2"))
 
+# Marker the solver outputs when it detects a generic (non-specific) rubric
+GENERAL_RUBRIC_MARKER = "<GENERAL_RUBRIC>"
+
+# Weight penalty for generic rubrics:
+# - Generic rubric's own reward = normal_reward / w
+# - Unlike garbage, generic rubrics' evaluations of others are NOT down-weighted
+GENERAL_RUBRIC_WEIGHT = float(os.environ.get("GRM_GENERAL_RUBRIC_WEIGHT", "2"))
+
 # Rollout logging directory
 ROLLOUT_LOG_DIR = os.environ.get("GRM_ROLLOUT_LOG_DIR", "out/rl/rollout_logs")
 
@@ -299,6 +307,8 @@ class MetaRewardFunction:
 
         # Track solver-detected garbage rubrics per question
         solver_garbage: Dict[int, set] = {}  # q_idx -> set of local indices flagged garbage
+        # Track solver-detected generic (non-specific) rubrics per question
+        solver_general: Dict[int, set] = {}  # q_idx -> set of local indices flagged generic
 
         def _coordinate_question(q_idx: int, q: str, items: List[Tuple[int, str]], n: int):
             """Wait for solver results, then submit K-sparse oracle evals."""
@@ -337,6 +347,21 @@ class MetaRewardFunction:
                       f"rubrics as garbage (indices {sorted(garbage_local)}, "
                       f"{n_kept} kept with answer)")
             solver_garbage[q_idx] = garbage_local
+
+            # ── Solver-based generic rubric detection ──────────────────
+            # If the solver output contains <GENERAL_RUBRIC>, the rubric was
+            # overly generic / not specific to the question.  Strip the marker
+            # but KEEP the answer.  Generic rubrics get penalised own reward
+            # (÷w) but their evaluations of others keep normal weight.
+            general_local = set()
+            for local_i, ans in list(answers.items()):
+                if GENERAL_RUBRIC_MARKER in ans:
+                    general_local.add(local_i)
+                    answers[local_i] = ans.replace(GENERAL_RUBRIC_MARKER, "").strip()
+            if general_local:
+                print(f"[MetaReward] Q{q_idx}: solver flagged {len(general_local)}/{n} "
+                      f"rubrics as generic (indices {sorted(general_local)})")
+            solver_general[q_idx] = general_local
 
             if n < 2:
                 if 0 in garbage_local:
@@ -404,6 +429,8 @@ class MetaRewardFunction:
 
             # Solver-detected garbage indices for this question
             q_garbage = solver_garbage.get(q_idx, set())
+            # Solver-detected generic indices for this question
+            q_general = solver_general.get(q_idx, set())
 
             if n < 2:
                 if not eval_futures.get(q_idx):
@@ -486,6 +513,10 @@ class MetaRewardFunction:
                     # Garbage rubric's own reward is penalised by /w
                     if i in q_garbage:
                         consensus = consensus / w
+
+                    # Generic rubric's own reward is penalised (but NOT its evaluator weight)
+                    if i in q_general:
+                        consensus = consensus / GENERAL_RUBRIC_WEIGHT
 
                     # Add rubric quality adjustment
                     qa = quality_adjustments[indices[i]] if RUBRIC_QUALITY_CONFIG.enabled else 0.0

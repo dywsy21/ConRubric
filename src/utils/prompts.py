@@ -27,6 +27,7 @@ Please ensure your answer follows these evaluation rubric:
 {rubric}
 
 IMPORTANT: If the rubric above is garbled, nonsensical, repetitive garbage, or completely unrelated to the question, begin your response with the marker <GARBAGE_RUBRIC> on its own line, then still answer the question to the best of your ability.
+If the rubric is NOT garbage but is overly generic and lacks specificity to the actual question (e.g., it uses vague phrases like "provide accurate information" or "avoid harmful content" without referencing the specific topic, scenario, or details of the question), begin your response with the marker <GENERAL_RUBRIC> on its own line, then still answer the question following the rubric.
 Otherwise, answer the question normally.
 
 Answer:
