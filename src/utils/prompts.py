@@ -27,10 +27,11 @@ Please ensure your answer follows these evaluation rubric:
 {rubric}
 
 IMPORTANT: If the rubric above is garbled, nonsensical, repetitive garbage, or completely unrelated to the question, begin your response with the marker <GARBAGE_RUBRIC> on its own line, then still answer the question to the best of your ability.
-If the rubric is NOT garbage but is a boilerplate template that could apply to ANY question — it contains ZERO mention of the specific topic, entities, conditions, or scenario described in the question above. For example:
-- Generic (flag it): "Provide accurate information", "Avoid harmful content", "Be concise and clear" — these say nothing about what the question actually asks.
-- NOT generic (do NOT flag): "Accurately describes H2O2 rinse side effects", "Addresses chronic fatigue causes" — these reference specific topics from the question.
-Only if the rubric is truly a content-free template with no question-specific terms at all, begin your response with the marker <GENERAL_RUBRIC> on its own line, then still answer the question following the rubric.
+If the rubric is NOT garbage, check whether the MAJORITY of its criteria are generic boilerplate that could apply to ANY question — containing no mention of the specific topic, entities, conditions, or scenario described in the question. Examples of generic criteria:
+- "Provide accurate information", "Avoid harmful content", "Be concise and clear" — these say nothing about what the question actually asks.
+Examples of question-specific criteria (NOT generic):
+- "Accurately describes H2O2 rinse side effects", "Addresses chronic fatigue causes" — these reference specific topics from the question.
+Only if MORE THAN HALF of the criteria in the rubric are generic boilerplate like the examples above, begin your response with the marker <GENERAL_RUBRIC> on its own line, then still answer the question following the rubric. If most criteria are question-specific, do NOT flag it even if a few criteria are vague.
 Otherwise, answer the question normally.
 
 Answer:
