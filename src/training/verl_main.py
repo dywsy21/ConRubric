@@ -82,7 +82,7 @@ def main_elastic():
 
 if __name__ == "__main__":
     _child = os.getenv("_ELASTIC_CHILD")
-    _elastic = os.getenv("ELASTIC_TRAINING", "1")
+    _elastic = os.getenv("ELASTIC_TRAINING", "0")
     print(f"[verl_main] _ELASTIC_CHILD={_child!r}, ELASTIC_TRAINING={_elastic!r}", flush=True)
     if _child == "1" or _elastic == "0":
         # Child process — run training directly via Hydra.
