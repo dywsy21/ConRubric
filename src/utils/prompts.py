@@ -27,7 +27,10 @@ Please ensure your answer follows these evaluation rubric:
 {rubric}
 
 IMPORTANT: If the rubric above is garbled, nonsensical, repetitive garbage, or completely unrelated to the question, begin your response with the marker <GARBAGE_RUBRIC> on its own line, then still answer the question to the best of your ability.
-If the rubric is NOT garbage but is overly generic and lacks specificity to the actual question (e.g., it uses vague phrases like "provide accurate information" or "avoid harmful content" without referencing the specific topic, scenario, or details of the question), begin your response with the marker <GENERAL_RUBRIC> on its own line, then still answer the question following the rubric.
+If the rubric is NOT garbage but is a boilerplate template that could apply to ANY question — it contains ZERO mention of the specific topic, entities, conditions, or scenario described in the question above. For example:
+- Generic (flag it): "Provide accurate information", "Avoid harmful content", "Be concise and clear" — these say nothing about what the question actually asks.
+- NOT generic (do NOT flag): "Accurately describes H2O2 rinse side effects", "Addresses chronic fatigue causes" — these reference specific topics from the question.
+Only if the rubric is truly a content-free template with no question-specific terms at all, begin your response with the marker <GENERAL_RUBRIC> on its own line, then still answer the question following the rubric.
 Otherwise, answer the question normally.
 
 Answer:

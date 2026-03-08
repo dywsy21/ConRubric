@@ -361,6 +361,14 @@ class MetaRewardFunction:
             if general_local:
                 print(f"[MetaReward] Q{q_idx}: solver flagged {len(general_local)}/{n} "
                       f"rubrics as generic (indices {sorted(general_local)})")
+            # Majority-vote gating: only treat as generic if >50% of
+            # rollouts for this question were flagged.  Sparse flags are
+            # likely solver false-positives.
+            if len(general_local) <= n / 2:
+                if general_local:
+                    print(f"[MetaReward] Q{q_idx}: generic flags below majority "
+                          f"({len(general_local)}/{n}), ignoring")
+                general_local = set()
             solver_general[q_idx] = general_local
 
             if n < 2:
