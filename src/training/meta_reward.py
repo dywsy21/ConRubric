@@ -1,11 +1,12 @@
 import json
 import os
+import re
 import random
 import threading
 import torch
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, Future, as_completed
 from tqdm import tqdm
@@ -54,6 +55,66 @@ GENERAL_RUBRIC_WEIGHT = float(os.environ.get("GRM_GENERAL_RUBRIC_WEIGHT", "2"))
 
 # Rollout logging directory
 ROLLOUT_LOG_DIR = os.environ.get("GRM_ROLLOUT_LOG_DIR", "out/rl/rollout_logs")
+
+# ── Generic-flag false-positive override ──────────────────────────────────
+# Words that appear in almost any health-domain rubric — NOT topic-specific.
+# Only words >= 5 chars matter (shorter words are excluded by the overlap check).
+_GENERIC_STOP_WORDS: Set[str] = {
+    # common English (5+ chars)
+    "about", "after", "along", "among", "asked", "based", "being", "below",
+    "between", "better", "could", "daily", "doing", "during", "every",
+    "first", "function", "given", "going", "great", "might", "never",
+    "other", "partial", "please", "point", "should", "since", "still",
+    "their", "there", "these", "thing", "think", "those", "three", "times",
+    "today", "total", "under", "until", "using", "where", "which", "while",
+    "whole", "worse", "would", "years", "without",
+    # generic medical / clinical terms
+    "acute", "advice", "assess", "assessment", "avoid", "based", "cause",
+    "causes", "changes", "check", "chronic", "clear", "clinic", "clinical",
+    "common", "complete", "concern", "concerns", "condition", "conditions",
+    "conflicting", "consider", "context", "correct", "critical", "current",
+    "details", "diagnosis", "discuss", "domain", "emergency", "ensure",
+    "evaluate", "evaluation", "evidence", "explain", "factor", "factors",
+    "follow", "further", "general", "guidance", "guideline", "guidelines",
+    "health", "important", "immediate", "include", "includes", "including",
+    "information", "initial", "issue", "issues", "level", "levels",
+    "management", "medical", "mention", "moderate", "monitor", "needs",
+    "normal", "notes", "objective", "option", "options", "outcome",
+    "outcomes", "overall", "patient", "patients", "physical", "potential",
+    "practice", "practices", "present", "produce", "professional",
+    "properly", "provide", "provides", "quality", "questions", "recommend",
+    "recommendation", "recovery", "reduce", "refer", "referral", "relevant",
+    "report", "response", "results", "review", "risks", "safety",
+    "screening", "severe", "signs", "situation", "specific", "standard",
+    "steps", "stress", "subjective", "suggest", "support", "symptoms",
+    "system", "testing", "therapy", "times", "treatment", "understand",
+    "visit",
+    # rubric-meta / prompt terms
+    "accuracy", "actionable", "address", "addresses", "alignment",
+    "answer", "answers", "appropriate", "clarity", "communication",
+    "comprehensive", "criteria", "criterion", "effective", "empathy",
+    "model", "models", "points", "question", "rubric", "tags", "tailors",
+    # short but common medical
+    "care", "data", "diet", "drug", "exam", "labs", "life", "long",
+    "meds", "pain", "plan", "risk", "safe", "test", "type",
+}
+
+
+def _has_topic_specificity(question: str, rubric: str, min_overlap: int = 2) -> list:
+    """Check if rubric contains topic-specific words from the question.
+
+    Returns the list of topic-overlap words (empty if no specificity found).
+    Used to override false-positive <GENERAL_RUBRIC> flags from the solver.
+    """
+    # Extract content words (5+ chars) from the question
+    q_words = {w.lower() for w in re.findall(r"[a-zA-Z]{5,}", question)}
+    q_topic = q_words - _GENERIC_STOP_WORDS
+
+    rubric_lower = rubric.lower()
+    overlap = [w for w in q_topic if w in rubric_lower]
+
+    return overlap if len(overlap) >= min_overlap else []
+
 
 class MetaRewardFunction:
     def __init__(self, solver_model_name: str, oracle_model_name: str, 
@@ -358,6 +419,23 @@ class MetaRewardFunction:
                 if GENERAL_RUBRIC_MARKER in ans:
                     general_local.add(local_i)
                     answers[local_i] = ans.replace(GENERAL_RUBRIC_MARKER, "").strip()
+
+            # ── False-positive override: if rubric contains topic words ──
+            # The solver sometimes flags rubrics that DO contain topic-specific
+            # content.  Check keyword overlap and reverse the flag if found.
+            overridden = set()
+            if general_local:
+                for local_i in list(general_local):
+                    rubric_text = items[local_i][1]
+                    overlap = _has_topic_specificity(q, rubric_text)
+                    if overlap:
+                        overridden.add(local_i)
+                        general_local.discard(local_i)
+                if overridden:
+                    print(f"[MetaReward] Q{q_idx}: overrode generic flag for "
+                          f"{len(overridden)}/{len(overridden) + len(general_local)} "
+                          f"rubrics (topic words found)")
+
             if general_local:
                 print(f"[MetaReward] Q{q_idx}: solver flagged {len(general_local)}/{n} "
                       f"rubrics as generic (indices {sorted(general_local)})")
