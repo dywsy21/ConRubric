@@ -27,9 +27,15 @@ Please ensure your answer follows these evaluation rubric:
 {rubric}
 
 IMPORTANT: If the rubric above is garbled, nonsensical, repetitive garbage, or completely unrelated to the question, begin your response with the marker <GARBAGE_RUBRIC> on its own line, then still answer the question to the best of your ability.
-If the rubric is NOT garbage, check whether it is a generic template. To decide, look at the CONTENT of each criterion — ignore formatting like "Models answer with..." which is just the rubric's style. A criterion is question-specific if it mentions ANY topic, entity, condition, procedure, or scenario from the question, even briefly. A criterion is generic only if it could be copy-pasted into ANY question's rubric without change (e.g., "Be concise", "Avoid harmful content", "Provide accurate information").
-Only if the rubric contains NO question-specific terms whatsoever — not a single criterion references the actual topic of the question — begin your response with the marker <GENERAL_RUBRIC> on its own line, then still answer the question following the rubric.
-Otherwise, answer the question normally — do NOT flag rubrics that mention the question's topic even if some criteria are vague.
+If the rubric is NOT garbage, check whether it is a generic template that could apply to any question in the same broad domain.
+To decide, scan each criterion for a SPECIFIC reference to the question's actual subject — the named disease, procedure, entity, chemical, body part, scenario, or concept. Ignore formatting style like "Models answer with...".
+These do NOT count as question-specific:
+  - Domain labels in tags or text: "health", "clinical", "safety", "medical", "life", "communication"
+  - Abstract references: "the question", "the topic", "the user's situation", "the current topic"
+  - Generic quality phrases: "clarity", "accuracy", "actionable advice", "empathy", "next steps"
+A criterion IS question-specific only if it names something you could NOT copy-paste unchanged into a rubric for a completely different question in the same field (e.g., it says "mammogram" or "parathyroid" or "aspirin dosage" or "A1C" — an actual subject term from the question).
+If NOT A SINGLE criterion in the entire rubric names the actual subject of the question, begin your response with the marker <GENERAL_RUBRIC> on its own line, then still answer the question following the rubric.
+Otherwise, answer the question normally — do NOT flag rubrics where at least one criterion references the specific topic.
 
 Answer:
 """
