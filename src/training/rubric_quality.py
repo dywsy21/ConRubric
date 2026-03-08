@@ -50,6 +50,11 @@ class RubricQualityConfig:
     # Similarity threshold for duplicate detection (Jaccard on 3-gram sets)
     similarity_threshold: float = float(os.getenv("GRM_SIM_THRESHOLD", "0.55"))
 
+    # Filler-pattern penalty: penalizes criteria that start with
+    # "Models answer with ..." or similar boilerplate.  Per-criterion penalty
+    # scaled by (n_filler / n_total).
+    lambda_filler: float = float(os.getenv("GRM_LAMBDA_FILLER", "1.5"))
+
     # Whether to enable quality scoring at all (master switch)
     enabled: bool = os.getenv("GRM_RUBRIC_QUALITY", "true").lower() in ("1", "true", "yes")
 
@@ -267,7 +272,24 @@ def score_rubric_quality(
         point_div_bonus = 0.0
     detail["point_diversity_bonus"] = point_div_bonus
 
-    total = rep_penalty + div_bonus + len_penalty + trunc_penalty + token_len_penalty + point_div_bonus
+    # ── 7. Filler-pattern penalty ──────────────────────────────────
+    # Penalize criteria that follow the "Models answer with ..." template
+    # or similar boilerplate filler patterns.  These are a sign the model
+    # is generating a generic template instead of question-specific rubric.
+    _FILLER_RE = re.compile(
+        r"(?i)^models?\s+answers?\s+with\b"
+        r"|^(?:the\s+)?(?:response|answer|model)\s+(?:shows?|demonstrates?|maintains?|provides?)\s+"
+        r"(?:empathy|compassion|supportive|appropriate|sensitivity)",
+    )
+    n_filler = sum(1 for c in criteria if _FILLER_RE.search(c.text))
+    if n_filler > 0 and n > 0:
+        filler_penalty = -config.lambda_filler * (n_filler / n)
+    else:
+        filler_penalty = 0.0
+    detail["filler_pattern_penalty"] = filler_penalty
+
+    total = (rep_penalty + div_bonus + len_penalty + trunc_penalty
+             + token_len_penalty + point_div_bonus + filler_penalty)
 
     return RubricQualityResult(
         n_criteria=n,

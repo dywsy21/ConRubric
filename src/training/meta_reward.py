@@ -43,7 +43,7 @@ GARBAGE_RUBRIC_MARKER = "<GARBAGE_RUBRIC>"
 # Weight penalty for garbage rubrics:
 # - Garbage rubric's own reward = normal_reward / w
 # - When garbage rubric evaluates others, its scores get weight 1/w
-GARBAGE_RUBRIC_WEIGHT = float(os.environ.get("GRM_GARBAGE_RUBRIC_WEIGHT", "2"))
+GARBAGE_RUBRIC_WEIGHT = float(os.environ.get("GRM_GARBAGE_RUBRIC_WEIGHT", "3"))
 
 # Marker the solver outputs when it detects a generic (non-specific) rubric
 GENERAL_RUBRIC_MARKER = "<GENERAL_RUBRIC>"
@@ -51,7 +51,7 @@ GENERAL_RUBRIC_MARKER = "<GENERAL_RUBRIC>"
 # Weight penalty for generic rubrics:
 # - Generic rubric's own reward = normal_reward / w
 # - Unlike garbage, generic rubrics' evaluations of others are NOT down-weighted
-GENERAL_RUBRIC_WEIGHT = float(os.environ.get("GRM_GENERAL_RUBRIC_WEIGHT", "2"))
+GENERAL_RUBRIC_WEIGHT = float(os.environ.get("GRM_GENERAL_RUBRIC_WEIGHT", "3"))
 
 # Rollout logging directory
 ROLLOUT_LOG_DIR = os.environ.get("GRM_ROLLOUT_LOG_DIR", "out/rl/rollout_logs")
@@ -420,14 +420,32 @@ class MetaRewardFunction:
                     general_local.add(local_i)
                     answers[local_i] = ans.replace(GENERAL_RUBRIC_MARKER, "").strip()
 
-            # ── False-positive override DISABLED ──
-            # The enhanced RUBRIC_GENERATION_PROMPT now enforces topic
-            # specificity directly, so we trust the solver's generic flag
-            # without second-guessing via keyword overlap.
+            # ── Programmatic generic detection fallback ──────────
+            # Even if the solver didn't flag a rubric, check topic
+            # specificity programmatically.  If no question-specific terms
+            # appear in the rubric text, mark it as generic.
+            # Guard: skip if question has no extractable topic words (all
+            # words <5 chars), to avoid false-flagging everything.
+            q_topic_words = {w.lower() for w in re.findall(r"[a-zA-Z]{5,}", q)} - _GENERIC_STOP_WORDS
+            if q_topic_words:  # only run when we have topic words to check
+                for local_i in range(n):
+                    if local_i in general_local or local_i in garbage_local:
+                        continue
+                    rubric_text_i = items[local_i][1]
+                    overlap = _has_topic_specificity(q, rubric_text_i, min_overlap=1)
+                    if not overlap:
+                        general_local.add(local_i)
+                        # Check for the notorious "Models answer with" filler
+                        if re.search(r'(?i)models?\s+answer\s+with', rubric_text_i):
+                            print(f"[MetaReward] Q{q_idx} rubric {local_i}: "
+                                  f"programmatic generic flag (\"Models answer with\" pattern)")
+                        else:
+                            print(f"[MetaReward] Q{q_idx} rubric {local_i}: "
+                                  f"programmatic generic flag (no topic-specific terms)")
 
             if general_local:
-                print(f"[MetaReward] Q{q_idx}: solver flagged {len(general_local)}/{n} "
-                      f"rubrics as generic (indices {sorted(general_local)})")
+                print(f"[MetaReward] Q{q_idx}: {len(general_local)}/{n} "
+                      f"rubrics flagged generic (indices {sorted(general_local)})")
             solver_general[q_idx] = general_local
 
             if n < 2:
