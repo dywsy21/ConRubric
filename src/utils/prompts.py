@@ -27,12 +27,9 @@ Please ensure your answer follows these evaluation rubric:
 {rubric}
 
 IMPORTANT: If the rubric above is garbled, nonsensical, repetitive garbage, or completely unrelated to the question, begin your response with the marker <GARBAGE_RUBRIC> on its own line, then still answer the question to the best of your ability.
-If the rubric is NOT garbage, check whether the MAJORITY of its criteria are generic boilerplate that could apply to ANY question — containing no mention of the specific topic, entities, conditions, or scenario described in the question. Examples of generic criteria:
-- "Provide accurate information", "Avoid harmful content", "Be concise and clear" — these say nothing about what the question actually asks.
-Examples of question-specific criteria (NOT generic):
-- "Accurately describes H2O2 rinse side effects", "Addresses chronic fatigue causes" — these reference specific topics from the question.
-Only if MORE THAN HALF of the criteria in the rubric are generic boilerplate like the examples above, begin your response with the marker <GENERAL_RUBRIC> on its own line, then still answer the question following the rubric. If most criteria are question-specific, do NOT flag it even if a few criteria are vague.
-Otherwise, answer the question normally.
+If the rubric is NOT garbage, check whether it is a generic template. To decide, look at the CONTENT of each criterion — ignore formatting like "Models answer with..." which is just the rubric's style. A criterion is question-specific if it mentions ANY topic, entity, condition, procedure, or scenario from the question, even briefly. A criterion is generic only if it could be copy-pasted into ANY question's rubric without change (e.g., "Be concise", "Avoid harmful content", "Provide accurate information").
+Only if the rubric contains NO question-specific terms whatsoever — not a single criterion references the actual topic of the question — begin your response with the marker <GENERAL_RUBRIC> on its own line, then still answer the question following the rubric.
+Otherwise, answer the question normally — do NOT flag rubrics that mention the question's topic even if some criteria are vague.
 
 Answer:
 """
