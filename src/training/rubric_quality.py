@@ -61,7 +61,7 @@ class RubricQualityConfig:
     # and cause criteria repetition (pre-think criteria get duplicated
     # after the think block).
     # Fixed penalty per occurrence, capped at lambda_think_leak.
-    lambda_think_leak: float = float(os.getenv("GRM_LAMBDA_THINK_LEAK", "1.0"))
+    lambda_think_leak: float = float(os.getenv("GRM_LAMBDA_THINK_LEAK", "1.5"))
 
     # Whether to enable quality scoring at all (master switch)
     enabled: bool = os.getenv("GRM_RUBRIC_QUALITY", "true").lower() in ("1", "true", "yes")
@@ -303,15 +303,51 @@ def score_rubric_quality(
     # then duplicates the criteria from before the tag.  This wastes
     # token budget and degrades rubric quality.
     #
-    # Penalty = -lambda * min(n_occurrences, 3) / 3
-    # → 1 occurrence = -lambda/3, 2 = -2*lambda/3, 3+ = -lambda (capped)
+    # KEY DESIGN: When think-leak is prevalent (most rollouts have it),
+    # a flat penalty provides zero discriminative signal.  Instead, we
+    # measure the *fraction of the rubric wasted* on think garbage
+    # (think tags + filler text + post-think duplicate criteria) so that
+    # rubrics with more waste get penalized more, creating gradient even
+    # when the base rate is high.
+    #
+    # Penalty = -lambda * waste_fraction   (0.0 to -lambda)
     think_tag = "<" + "/think>"  # split to avoid matching in source code
     n_think = rubric_text.count(think_tag)
-    if n_think > 0:
-        think_penalty = -config.lambda_think_leak * min(n_think, 3) / 3.0
+
+    # Post-think filler patterns (meta-commentary, not criteria)
+    _FILLER_PATTERNS = [
+        r"(?i)let me know if",
+        r"(?i)i think this meets",
+        r"(?i)i have completed",
+        r"(?i)let me know for revision",
+        r"(?i)i think this is good",
+        r"(?i)if you\'?d like to refine",
+        r"(?i)if you want to adjust",
+    ]
+    n_filler_phrases = sum(1 for p in _FILLER_PATTERNS if re.search(p, rubric_text))
+
+    if n_think > 0 or n_filler_phrases > 0:
+        # Estimate wasted characters: everything after the FIRST think tag
+        # is likely duplicated criteria + filler.  Also count filler phrase
+        # lengths even if no think tag is present.
+        first_think_pos = rubric_text.find(think_tag)
+        if first_think_pos >= 0:
+            # Everything after first think tag is waste
+            waste_chars = len(rubric_text) - first_think_pos
+        else:
+            # No think tag but has filler phrases — estimate ~50 chars each
+            waste_chars = n_filler_phrases * 50
+
+        total_chars = max(len(rubric_text), 1)
+        waste_fraction = min(waste_chars / total_chars, 1.0)
+
+        # Scale: penalty grows with waste fraction
+        think_penalty = -config.lambda_think_leak * waste_fraction
     else:
         think_penalty = 0.0
     detail["think_leak_penalty"] = think_penalty
+    detail["think_leak_count"] = n_think
+    detail["think_filler_count"] = n_filler_phrases
 
     total = (rep_penalty + div_bonus + len_penalty + trunc_penalty
              + token_len_penalty + point_div_bonus + filler_penalty
