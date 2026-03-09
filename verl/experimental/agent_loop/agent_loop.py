@@ -732,6 +732,19 @@ class AgentLoopWorkerBase:
 
     def _postprocess(self, inputs: list[_InternalAgentLoopOutput]) -> DataProto:
         """Process the padded outputs from _run_agent_loop and combine them into a batch."""
+        # Debug: check shapes before concat
+        resp_shapes = [input.response_ids.shape for input in inputs]
+        expected_resp = self.config.actor_rollout_ref.rollout.response_length
+        for i, shape in enumerate(resp_shapes):
+            if shape[1] != expected_resp:
+                print(f"[SHAPE_BUG] _postprocess input[{i}] response_ids shape={shape}, expected dim1={expected_resp}", flush=True)
+                # Force truncation
+                inputs[i].response_ids = inputs[i].response_ids[:, :expected_resp]
+                inputs[i].response_mask = inputs[i].response_mask[:, :expected_resp]
+                inputs[i].attention_mask = inputs[i].attention_mask[:, :expected_resp + self.config.actor_rollout_ref.rollout.prompt_length]
+                inputs[i].input_ids = inputs[i].input_ids[:, :expected_resp + self.config.actor_rollout_ref.rollout.prompt_length]
+                if inputs[i].response_logprobs is not None:
+                    inputs[i].response_logprobs = inputs[i].response_logprobs[:, :expected_resp]
         # Convert lists back to tensors and stack them to create a batch.
         prompt_ids = torch.cat([input.prompt_ids for input in inputs], dim=0)
         response_ids = torch.cat([input.response_ids for input in inputs], dim=0)
@@ -966,6 +979,10 @@ class AgentLoopManager:
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
+        # Debug: check shapes across workers before concat
+        for i, out in enumerate(outputs):
+            resp_shape = out.batch["responses"].shape if "responses" in out.batch.keys() else "N/A"
+            print(f"[CONCAT_DEBUG] worker {i}: responses shape={resp_shape}", flush=True)
         output = DataProto.concat(outputs)
         # Fix for Issue #4147: Always call sleep() to ensure proper cleanup
         self.sleep()
