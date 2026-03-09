@@ -429,6 +429,7 @@ class AgentLoopWorkerBase:
             top_p=config.top_p,
             repetition_penalty=1.0,
             logprobs=config.calculate_log_probs,
+            max_tokens=config.response_length,
         )
 
         # override sampling params for validation
@@ -552,11 +553,20 @@ class AgentLoopWorkerBase:
             prompt_output["input_ids"] = prompt_output["input_ids"].unsqueeze(0)
             prompt_output["attention_mask"] = prompt_output["attention_mask"].unsqueeze(0)
 
+        # Defensive truncation: ensure response doesn't exceed max length
+        max_resp_len = self.config.actor_rollout_ref.rollout.response_length
+        if len(output.response_ids) > max_resp_len:
+            output.response_ids = output.response_ids[:max_resp_len]
+        if len(output.response_mask) > max_resp_len:
+            output.response_mask = output.response_mask[:max_resp_len]
+        if output.response_logprobs is not None and len(output.response_logprobs) > max_resp_len:
+            output.response_logprobs = output.response_logprobs[:max_resp_len]
+
         self.tokenizer.padding_side = "right"
         response_output = self.tokenizer.pad(
             {"input_ids": output.response_ids},
             padding="max_length",
-            max_length=self.config.actor_rollout_ref.rollout.response_length,
+            max_length=max_resp_len,
             return_tensors="pt",
             return_attention_mask=True,
         )
@@ -567,7 +577,7 @@ class AgentLoopWorkerBase:
         response_mask_output = self.tokenizer.pad(
             {"input_ids": output.response_mask},
             padding="max_length",
-            max_length=self.config.actor_rollout_ref.rollout.response_length,
+            max_length=max_resp_len,
             return_tensors="pt",
             return_attention_mask=False,
         )
@@ -576,7 +586,7 @@ class AgentLoopWorkerBase:
 
         response_logprobs = None
         if output.response_logprobs is not None:
-            pad_size = self.config.actor_rollout_ref.rollout.response_length - len(output.response_logprobs)
+            pad_size = max_resp_len - len(output.response_logprobs)
             response_logprobs = torch.tensor(output.response_logprobs + [0.0] * pad_size).unsqueeze(0)
 
         response_mask = response_mask_output["input_ids"] * response_output["attention_mask"]
