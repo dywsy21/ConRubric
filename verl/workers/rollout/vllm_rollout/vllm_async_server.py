@@ -18,6 +18,12 @@ import json
 import logging
 import os
 from concurrent.futures import Future
+
+# Fix: Ray sometimes sets OMP_NUM_THREADS=0, which causes vLLM's
+# set_default_torch_num_threads to fail with "expects a positive integer".
+# Force it to ≥1 before any vLLM code reads it.
+if int(os.environ.get("OMP_NUM_THREADS", "1")) < 1:
+    os.environ["OMP_NUM_THREADS"] = "1"
 from pprint import pprint
 from typing import Any, Callable, Optional
 
