@@ -491,6 +491,9 @@ class AgentLoopWorkerBase:
         trace: bool = True,
         **kwargs,
     ) -> _InternalAgentLoopOutput:
+        # Defensive copy: vLLM server's generate() pops keys from the dict,
+        # so each concurrent coroutine must get its own copy.
+        sampling_params = dict(sampling_params)
         with rollout_trace_attr(
             step=trajectory["step"],
             sample_index=trajectory["sample_index"],
