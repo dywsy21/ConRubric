@@ -55,6 +55,14 @@ class RubricQualityConfig:
     # scaled by (n_filler / n_total).
     lambda_filler: float = float(os.getenv("GRM_LAMBDA_FILLER", "1.5"))
 
+    # Think-tag leakage penalty: penalizes rubrics that contain literal
+    # </think> tags in the output text.  These indicate the model is
+    # generating internal-monologue artifacts that waste token budget
+    # and cause criteria repetition (pre-think criteria get duplicated
+    # after the think block).
+    # Fixed penalty per occurrence, capped at lambda_think_leak.
+    lambda_think_leak: float = float(os.getenv("GRM_LAMBDA_THINK_LEAK", "1.0"))
+
     # Whether to enable quality scoring at all (master switch)
     enabled: bool = os.getenv("GRM_RUBRIC_QUALITY", "true").lower() in ("1", "true", "yes")
 
@@ -288,8 +296,26 @@ def score_rubric_quality(
         filler_penalty = 0.0
     detail["filler_pattern_penalty"] = filler_penalty
 
+    # ── 8. Think-tag leakage penalty ───────────────────────────────
+    # Detect literal </think> tags in rubric text.  When thinking is
+    # disabled, the model sometimes emits these as plain text, followed
+    # by filler phrases ("Let me know if you'd like to refine...") and
+    # then duplicates the criteria from before the tag.  This wastes
+    # token budget and degrades rubric quality.
+    #
+    # Penalty = -lambda * min(n_occurrences, 3) / 3
+    # → 1 occurrence = -lambda/3, 2 = -2*lambda/3, 3+ = -lambda (capped)
+    think_tag = "<" + "/think>"  # split to avoid matching in source code
+    n_think = rubric_text.count(think_tag)
+    if n_think > 0:
+        think_penalty = -config.lambda_think_leak * min(n_think, 3) / 3.0
+    else:
+        think_penalty = 0.0
+    detail["think_leak_penalty"] = think_penalty
+
     total = (rep_penalty + div_bonus + len_penalty + trunc_penalty
-             + token_len_penalty + point_div_bonus + filler_penalty)
+             + token_len_penalty + point_div_bonus + filler_penalty
+             + think_penalty)
 
     return RubricQualityResult(
         n_criteria=n,

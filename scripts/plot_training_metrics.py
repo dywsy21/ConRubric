@@ -8,8 +8,8 @@ Produces a multi-panel figure with:
   4. Grad norm over steps
   5. Response length (token-level, from log) over steps
   6. Pg clipfrac over steps
-  7. "Respond with" template percentage (from rollout logs)
-  8. Programmatic generic flag percentage (from training log)
+  7. Solver generic flag percentage (solver-detected via <GENERAL_RUBRIC> marker)
+  8. Combined generic flag percentage (solver + programmatic, from training log)
 
 Usage:
     python3 scripts/plot_training_metrics.py
@@ -53,16 +53,9 @@ with open(LOG_FILE) as f:
                 resplens.append(float(rl.group(1)) if rl else 0)
                 clips.append(float(c.group(1)) if c else 0)
 
-# ── 2. Parse rollout logs for template / generic percentages ───────────
+# ── 2. Parse rollout logs for rubric stats ─────────────────────────────
 
-respond_with_re = re.compile(
-    r"(?i)respond\s+with\s+(empathy|compassion|clarity|accurate|appropriate|understanding|concern)"
-)
-generic_word_re = re.compile(
-    r"(?i)(?:empathy|compassion|supportive tone|actionable advice|clarity|accuracy)"
-)
-
-rollout_steps, respond_with_pcts, generic_pcts = [], [], []
+rollout_steps = []
 rubric_char_lens_mean, rubric_char_lens_min, rubric_char_lens_max = [], [], []
 n_criteria_means = []
 
@@ -73,62 +66,68 @@ if os.path.isdir(ROLLOUT_DIR):
         with open(fpath) as fh:
             items = [json.loads(l) for l in fh]
 
-        total = 0
-        rw = 0
-        gen = 0
         char_lens = []
         crit_counts = []
         for item in items:
             for r in item.get("rollouts", []):
                 rubric = r.get("rubric", "")
-                total += 1
-                if respond_with_re.search(rubric):
-                    rw += 1
-                if generic_word_re.search(rubric):
-                    gen += 1
                 char_lens.append(len(rubric))
                 crit_counts.append(rubric.count("- ["))
 
-        if total > 0:
+        if char_lens:
             rollout_steps.append(step_num)
-            respond_with_pcts.append(100 * rw / total)
-            generic_pcts.append(100 * gen / total)
             rubric_char_lens_mean.append(np.mean(char_lens))
             rubric_char_lens_min.append(np.min(char_lens))
             rubric_char_lens_max.append(np.max(char_lens))
             n_criteria_means.append(np.mean(crit_counts))
 
-# ── 3. Parse programmatic generic flag rates from training log ─────────
+# ── 3. Parse generic flag rates from training log ──────────────────────
+#    Combined = solver (<GENERAL_RUBRIC> marker) + programmatic (topic check)
+#    Solver-only = combined - programmatic
 
 prog_generic_steps = []
 prog_generic_pcts = []
+solver_generic_steps = []
+solver_generic_pcts = []
 
 with open(LOG_FILE) as f:
     lines = f.readlines()
 
 current_step = None
-step_generic = defaultdict(lambda: [0, 0])
+step_combined_generic = defaultdict(lambda: [0, 0])   # step -> [flagged, total]
+step_programmatic_count = defaultdict(int)              # step -> count of programmatic flags
 
 for line in lines:
     sm = re.search(r"step:(\d+)", line)
     if sm and "actor/entropy" in line:
         current_step = int(sm.group(1))
 
+    # Combined generic total (solver + programmatic)
     mg = re.search(r"Q\d+:\s+(\d+)/(\d+)\s+rubrics flagged generic", line)
     if mg and current_step:
-        step_generic[current_step][0] += int(mg.group(1))
-        step_generic[current_step][1] += int(mg.group(2))
+        step_combined_generic[current_step][0] += int(mg.group(1))
+        step_combined_generic[current_step][1] += int(mg.group(2))
 
-for s in sorted(step_generic.keys()):
-    flagged, total = step_generic[s]
+    # Programmatic-only flags (per-rubric lines)
+    if "programmatic generic flag" in line and current_step:
+        step_programmatic_count[current_step] += 1
+
+for s in sorted(step_combined_generic.keys()):
+    flagged, total = step_combined_generic[s]
     if total > 0:
+        # Combined rate
         prog_generic_steps.append(s)
         prog_generic_pcts.append(100 * flagged / total)
+
+        # Solver-only rate = combined - programmatic
+        solver_only = max(0, flagged - step_programmatic_count.get(s, 0))
+        solver_generic_steps.append(s)
+        solver_generic_pcts.append(100 * solver_only / total)
 
 # ── 4. Plot ────────────────────────────────────────────────────────────
 
 fig, axes = plt.subplots(4, 2, figsize=(16, 18))
-fig.suptitle("GRM RL Training Metrics (Steps 361–540)", fontsize=16, y=0.98)
+fig.suptitle("GRM RL Training Metrics (Steps 361–578)", fontsize=16, y=0.98)
 
 # 4.1 Entropy
 ax = axes[0, 0]
@@ -177,19 +176,22 @@ ax.set_title("Gradient Norm")
 ax.legend()
 ax.grid(True, alpha=0.3)
 
-# 4.5 "Respond with" template %
+# 4.5 Solver Generic Flag %
 ax = axes[2, 0]
-if rollout_steps:
-    ax.plot(rollout_steps, respond_with_pcts, "r-o", markersize=2, alpha=0.7, label="'Respond with' template %")
-    ax.fill_between(rollout_steps, respond_with_pcts, alpha=0.2, color="red")
+if solver_generic_steps:
+    ax.plot(solver_generic_steps, solver_generic_pcts, "r-", alpha=0.6, linewidth=0.8)
+    if len(solver_generic_pcts) > 10:
+        window = 10
+        smoothed = np.convolve(solver_generic_pcts, np.ones(window)/window, mode="valid")
+        ax.plot(solver_generic_steps[window-1:], smoothed, "r-", linewidth=2, label=f"MA-{window}")
 ax.set_ylabel("Percentage (%)")
-ax.set_title("'Respond with empathy...' Template %")
+ax.set_title("Solver Generic Flag % (<GENERAL_RUBRIC>)")
 ax.set_ylim(-5, 105)
 ax.axhline(y=50, color="orange", linestyle="--", alpha=0.5)
 ax.legend()
 ax.grid(True, alpha=0.3)
 
-# 4.6 Programmatic Generic Flag %
+# 4.6 Combined Generic Flag %
 ax = axes[2, 1]
 if prog_generic_steps:
     ax.plot(prog_generic_steps, prog_generic_pcts, "orange", alpha=0.6, linewidth=0.8)
@@ -197,7 +199,7 @@ if prog_generic_steps:
         smoothed = np.convolve(prog_generic_pcts, np.ones(10)/10, mode="valid")
         ax.plot(prog_generic_steps[9:], smoothed, "orange", linewidth=2, label="MA-10")
 ax.set_ylabel("Percentage (%)")
-ax.set_title("Programmatic Generic Flag %")
+ax.set_title("Combined Generic Flag % (Solver + Programmatic)")
 ax.set_ylim(-5, 105)
 ax.legend()
 ax.grid(True, alpha=0.3)
