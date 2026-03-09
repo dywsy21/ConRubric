@@ -61,7 +61,19 @@ class RubricQualityConfig:
     # and cause criteria repetition (pre-think criteria get duplicated
     # after the think block).
     # Fixed penalty per occurrence, capped at lambda_think_leak.
-    lambda_think_leak: float = float(os.getenv("GRM_LAMBDA_THINK_LEAK", "1.5"))
+    # NOTE: Reduced from 1.5→0.3 after observing that aggressive penalty
+    # destabilized the model (think leak dropped to 0% but model started
+    # generating garbage text instead — degenerate digit loops in tags).
+    lambda_think_leak: float = float(os.getenv("GRM_LAMBDA_THINK_LEAK", "0.3"))
+
+    # Garbage-character penalty: detects degenerate output where the model
+    # produces long runs of random digits, CJK characters, or other non-
+    # alphabetic noise (typically in the tags field of criteria).  This is
+    # a sign of autoregressive collapse where the model enters a degenerate
+    # sampling loop.  Hard penalty to strongly discourage such output.
+    lambda_garbage_chars: float = float(os.getenv("GRM_LAMBDA_GARBAGE_CHARS", "3.0"))
+    # Minimum run of consecutive digit/random chars to trigger detection
+    garbage_char_run_min: int = int(os.getenv("GRM_GARBAGE_CHAR_RUN_MIN", "10"))
 
     # Whether to enable quality scoring at all (master switch)
     enabled: bool = os.getenv("GRM_RUBRIC_QUALITY", "true").lower() in ("1", "true", "yes")
@@ -349,9 +361,30 @@ def score_rubric_quality(
     detail["think_leak_count"] = n_think
     detail["think_filler_count"] = n_filler_phrases
 
+    # ── 9. Garbage-character detection ─────────────────────────────
+    # Detect degenerate output: long runs of digits, random chars, or mixed
+    # garbage that indicate autoregressive collapse.  Common patterns:
+    #   - tags: ",-d836330183446623556882..."  (digit loops in tags)
+    #   - 587\n734465681082787...             (raw digit sequences)
+    # We look for runs of N+ consecutive non-alpha, non-space, non-punct chars
+    # (where punct = common rubric punctuation: []+-|:,.).
+    _GARBAGE_RUN_RE = re.compile(
+        r'[^a-zA-Z\s\[\]\+\-\|:,\.\(\)"\'/;!?]{'
+        + str(config.garbage_char_run_min)
+        + r',}'
+    )
+    garbage_runs = _GARBAGE_RUN_RE.findall(rubric_text)
+    if garbage_runs:
+        # Hard penalty: apply full lambda regardless of how many runs
+        garbage_penalty = -config.lambda_garbage_chars
+    else:
+        garbage_penalty = 0.0
+    detail["garbage_chars_penalty"] = garbage_penalty
+    detail["garbage_char_runs"] = len(garbage_runs)
+
     total = (rep_penalty + div_bonus + len_penalty + trunc_penalty
              + token_len_penalty + point_div_bonus + filler_penalty
-             + think_penalty)
+             + think_penalty + garbage_penalty)
 
     return RubricQualityResult(
         n_criteria=n,

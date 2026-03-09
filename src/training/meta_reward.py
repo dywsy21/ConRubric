@@ -43,7 +43,9 @@ GARBAGE_RUBRIC_MARKER = "<GARBAGE_RUBRIC>"
 # Weight penalty for garbage rubrics:
 # - Garbage rubric's own reward = normal_reward / w
 # - When garbage rubric evaluates others, its scores get weight 1/w
-GARBAGE_RUBRIC_WEIGHT = float(os.environ.get("GRM_GARBAGE_RUBRIC_WEIGHT", "3"))
+# Increased from 3→10 to strongly discourage garbage generation.
+# With weight=10, a garbage rubric scoring 8.0 consensus only gets 0.8 reward.
+GARBAGE_RUBRIC_WEIGHT = float(os.environ.get("GRM_GARBAGE_RUBRIC_WEIGHT", "10"))
 
 # Marker the solver outputs when it detects a generic (non-specific) rubric
 GENERAL_RUBRIC_MARKER = "<GENERAL_RUBRIC>"
