@@ -981,8 +981,8 @@ class AgentLoopManager:
         )
         # Debug: check shapes across workers before concat
         for i, out in enumerate(outputs):
-            resp_shape = out.batch["responses"].shape if "responses" in out.batch.keys() else "N/A"
-            print(f"[CONCAT_DEBUG] worker {i}: responses shape={resp_shape}", flush=True)
+            shapes = {k: out.batch[k].shape for k in out.batch.keys()}
+            print(f"[CONCAT_DEBUG] worker {i}: {shapes}", flush=True)
         output = DataProto.concat(outputs)
         # Fix for Issue #4147: Always call sleep() to ensure proper cleanup
         self.sleep()
