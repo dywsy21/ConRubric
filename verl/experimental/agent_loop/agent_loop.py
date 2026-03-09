@@ -982,8 +982,24 @@ class AgentLoopManager:
         # Debug: check shapes across workers before concat
         for i, out in enumerate(outputs):
             shapes = {k: out.batch[k].shape for k in out.batch.keys()}
-            print(f"[CONCAT_DEBUG] worker {i}: {shapes}", flush=True)
-        output = DataProto.concat(outputs)
+            print(f"[CONCAT_DEBUG] worker {i}: batch_keys={list(out.batch.keys())} shapes={shapes}", flush=True)
+            if out.non_tensor_batch:
+                ntb_info = {k: (type(v).__name__, v.shape if hasattr(v, 'shape') else len(v) if hasattr(v, '__len__') else '?') for k, v in out.non_tensor_batch.items()}
+                print(f"[CONCAT_DEBUG] worker {i}: non_tensor_batch={ntb_info}", flush=True)
+        try:
+            output = DataProto.concat(outputs)
+        except RuntimeError as e:
+            # Detailed debug: try concat key by key
+            print(f"[CONCAT_CRASH] Error: {e}", flush=True)
+            for key in outputs[0].batch.keys():
+                tensors = [out.batch[key] for out in outputs]
+                shapes = [t.shape for t in tensors]
+                print(f"[CONCAT_CRASH]   key={key}: shapes={shapes}", flush=True)
+                try:
+                    torch.cat(tensors, dim=0)
+                except RuntimeError as e2:
+                    print(f"[CONCAT_CRASH]   key={key}: FAILED: {e2}", flush=True)
+            raise
         # Fix for Issue #4147: Always call sleep() to ensure proper cleanup
         self.sleep()
         if self.reward_model_manager:
