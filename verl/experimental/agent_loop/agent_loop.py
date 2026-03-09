@@ -544,11 +544,17 @@ class AgentLoopWorkerBase:
         #   e.g., [0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,0,0,0,0]
 
         # TODO(wuxibin): remove padding and use tensordict.
+        # Defensive truncation: ensure prompt doesn't exceed max prompt length
+        max_prompt_len = self.config.actor_rollout_ref.rollout.prompt_length
+        if len(output.prompt_ids) > max_prompt_len:
+            # Left-truncate to keep the most recent tokens (chat template end)
+            output.prompt_ids = output.prompt_ids[-max_prompt_len:]
+
         self.tokenizer.padding_side = "left"
         prompt_output = self.tokenizer.pad(
             {"input_ids": output.prompt_ids},
             padding="max_length",
-            max_length=self.config.actor_rollout_ref.rollout.prompt_length,
+            max_length=max_prompt_len,
             return_tensors="pt",
             return_attention_mask=True,
         )
@@ -732,19 +738,22 @@ class AgentLoopWorkerBase:
 
     def _postprocess(self, inputs: list[_InternalAgentLoopOutput]) -> DataProto:
         """Process the padded outputs from _run_agent_loop and combine them into a batch."""
-        # Debug: check shapes before concat
-        resp_shapes = [input.response_ids.shape for input in inputs]
+        # Defensive: enforce consistent tensor shapes across all sequences in this worker
         expected_resp = self.config.actor_rollout_ref.rollout.response_length
-        for i, shape in enumerate(resp_shapes):
-            if shape[1] != expected_resp:
-                print(f"[SHAPE_BUG] _postprocess input[{i}] response_ids shape={shape}, expected dim1={expected_resp}", flush=True)
-                # Force truncation
-                inputs[i].response_ids = inputs[i].response_ids[:, :expected_resp]
-                inputs[i].response_mask = inputs[i].response_mask[:, :expected_resp]
-                inputs[i].attention_mask = inputs[i].attention_mask[:, :expected_resp + self.config.actor_rollout_ref.rollout.prompt_length]
-                inputs[i].input_ids = inputs[i].input_ids[:, :expected_resp + self.config.actor_rollout_ref.rollout.prompt_length]
-                if inputs[i].response_logprobs is not None:
-                    inputs[i].response_logprobs = inputs[i].response_logprobs[:, :expected_resp]
+        expected_prompt = self.config.actor_rollout_ref.rollout.prompt_length
+        expected_total = expected_prompt + expected_resp
+        for i, inp in enumerate(inputs):
+            if inp.prompt_ids.shape[1] != expected_prompt:
+                inputs[i].prompt_ids = inp.prompt_ids[:, -expected_prompt:]  # left-truncate
+            if inp.response_ids.shape[1] != expected_resp:
+                inputs[i].response_ids = inp.response_ids[:, :expected_resp]
+                inputs[i].response_mask = inp.response_mask[:, :expected_resp]
+                if inp.response_logprobs is not None:
+                    inputs[i].response_logprobs = inp.response_logprobs[:, :expected_resp]
+            if inp.input_ids.shape[-1] != expected_total:
+                inputs[i].input_ids = inp.input_ids[:, -expected_total:]  # left-truncate
+                inputs[i].attention_mask = inp.attention_mask[:, -expected_total:]
+                inputs[i].position_ids = inp.position_ids[..., -expected_total:]  # handles both 2D and 3D
         # Convert lists back to tensors and stack them to create a batch.
         prompt_ids = torch.cat([input.prompt_ids for input in inputs], dim=0)
         response_ids = torch.cat([input.response_ids for input in inputs], dim=0)
@@ -979,27 +988,7 @@ class AgentLoopManager:
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
-        # Debug: check shapes across workers before concat
-        for i, out in enumerate(outputs):
-            shapes = {k: out.batch[k].shape for k in out.batch.keys()}
-            print(f"[CONCAT_DEBUG] worker {i}: batch_keys={list(out.batch.keys())} shapes={shapes}", flush=True)
-            if out.non_tensor_batch:
-                ntb_info = {k: (type(v).__name__, v.shape if hasattr(v, 'shape') else len(v) if hasattr(v, '__len__') else '?') for k, v in out.non_tensor_batch.items()}
-                print(f"[CONCAT_DEBUG] worker {i}: non_tensor_batch={ntb_info}", flush=True)
-        try:
-            output = DataProto.concat(outputs)
-        except RuntimeError as e:
-            # Detailed debug: try concat key by key
-            print(f"[CONCAT_CRASH] Error: {e}", flush=True)
-            for key in outputs[0].batch.keys():
-                tensors = [out.batch[key] for out in outputs]
-                shapes = [t.shape for t in tensors]
-                print(f"[CONCAT_CRASH]   key={key}: shapes={shapes}", flush=True)
-                try:
-                    torch.cat(tensors, dim=0)
-                except RuntimeError as e2:
-                    print(f"[CONCAT_CRASH]   key={key}: FAILED: {e2}", flush=True)
-            raise
+        output = DataProto.concat(outputs)
         # Fix for Issue #4147: Always call sleep() to ensure proper cleanup
         self.sleep()
         if self.reward_model_manager:
