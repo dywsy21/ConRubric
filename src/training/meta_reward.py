@@ -270,8 +270,10 @@ class MetaRewardFunction:
         # ── Batch-Level Similarity Penalty ──────────────────────────────
         # Detects template collapse: when multiple rubrics for the same
         # question are structurally near-identical despite cosmetic word changes.
-        # Three signals combined: (A) point-value multiset Jaccard,
-        # (B) content-word Jaccard, (C) content-word bigram Jaccard.
+        # Two components:
+        #   1) Multi-signal pairwise similarity (pts, word, bigram Jaccard)
+        #   2) First-criterion clustering: if >60% of rubrics share
+        #      the same opening concept, apply a strong collapse penalty.
         _SIM_STOP = frozenset({
             'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to',
             'for', 'of', 'with', 'by', 'from', 'is', 'are', 'was', 'were',
@@ -291,18 +293,21 @@ class MetaRewardFunction:
         from collections import Counter as _Counter
         batch_sim_penalties = np.zeros(len(questions), dtype=np.float32)
         sim_details = []
+        collapse_rates = []  # for logging
 
         for q, r_list in q_items:
             if len(r_list) < 2:
                 continue
 
             # Per-rubric feature extraction
-            point_sigs_sorted = []  # sorted point-value tuple (for multiset Jaccard)
-            word_sets = []          # set of content words from all criteria
-            bigram_sets = []        # set of content-word bigrams
+            point_sigs_sorted = []  # sorted point-value tuple
+            word_sets = []          # content words from all criteria
+            bigram_sets = []        # content-word bigrams
+            first_crit_words = []   # content words from the FIRST criterion only
             for _, rubric in r_list:
                 pts = []
                 words_list = []
+                first_words = None
                 for line in rubric.splitlines():
                     m = _CRIT_RE_SIM.match(line)
                     if m:
@@ -310,14 +315,17 @@ class MetaRewardFunction:
                         ws = [w for w in re.findall(r'[a-z]{4,}', m.group(2).lower())
                               if w not in _SIM_STOP]
                         words_list.extend(ws)
+                        if first_words is None:
+                            first_words = frozenset(ws)
                 point_sigs_sorted.append(tuple(sorted(pts)))
                 word_sets.append(set(words_list))
                 bgs = set()
                 for k in range(len(words_list) - 1):
                     bgs.add((words_list[k], words_list[k + 1]))
                 bigram_sets.append(bgs)
+                first_crit_words.append(first_words or frozenset())
 
-            # Compute per-rubric mean similarity vs rest of batch
+            # ── Component 1: Pairwise multi-signal similarity ──────────
             for i, (global_idx, _) in enumerate(r_list):
                 pair_scores = []
                 for j in range(len(r_list)):
@@ -336,26 +344,58 @@ class MetaRewardFunction:
                     # Signal C: bigram Jaccard
                     bi, bj = bigram_sets[i], bigram_sets[j]
                     bg_j = len(bi & bj) / max(len(bi | bj), 1) if (bi and bj) else 0.0
-                    # Combined weighted score
                     combined = 0.25 * pts_sim + 0.35 * word_j + 0.40 * bg_j
                     pair_scores.append(combined)
 
                 mean_sim = sum(pair_scores) / len(pair_scores) if pair_scores else 0.0
                 sim_details.append(mean_sim)
 
-                # Penalty: threshold 0.20, linearly to -8.0 at sim=1.0
                 if mean_sim > 0.20:
                     penalty = -8.0 * (mean_sim - 0.20) / 0.80
-                    batch_sim_penalties[global_idx] = penalty
+                    batch_sim_penalties[global_idx] += penalty
                     quality_adjustments[global_idx] += penalty
+
+            # ── Component 2: First-criterion clustering ────────────────
+            # Cluster rubrics by their first criterion's content words.
+            # If a single cluster dominates (>60%), penalize its members.
+            clusters: List[set] = []
+            for i in range(len(first_crit_words)):
+                placed = False
+                for cluster in clusters:
+                    rep = next(iter(cluster))
+                    fa, fb = first_crit_words[i], first_crit_words[rep]
+                    if fa and fb:
+                        j_sim = len(fa & fb) / max(len(fa | fb), 1)
+                        if j_sim >= 0.4:  # same-concept threshold
+                            cluster.add(i)
+                            placed = True
+                            break
+                if not placed:
+                    clusters.append({i})
+
+            largest_cluster = max(clusters, key=len) if clusters else set()
+            collapse_rate = len(largest_cluster) / len(r_list)
+            collapse_rates.append(collapse_rate)
+
+            if collapse_rate > 0.6:
+                # Scale: -4.0 at collapse_rate=1.0, 0 at collapse_rate=0.6
+                collapse_pen = -4.0 * (collapse_rate - 0.6) / 0.4
+                for i in largest_cluster:
+                    g_idx = r_list[i][0]
+                    batch_sim_penalties[g_idx] += collapse_pen
+                    quality_adjustments[g_idx] += collapse_pen
 
         if sim_details:
             _mean_sim = np.mean(sim_details)
             _mean_pen = np.mean(batch_sim_penalties)
             _n_penalized = int(np.sum(batch_sim_penalties < -0.01))
+            _mean_collapse = np.mean(collapse_rates) if collapse_rates else 0
+            _n_collapsed = sum(1 for r in collapse_rates if r > 0.6)
             print(f"[MetaReward] batch_sim_score_mean={_mean_sim:.2%}, "
                   f"batch_sim_penalty_mean={_mean_pen:.3f}, "
-                  f"batch_sim_penalized={_n_penalized}/{len(batch_sim_penalties)}")
+                  f"batch_sim_penalized={_n_penalized}/{len(batch_sim_penalties)}, "
+                  f"first_crit_collapse_mean={_mean_collapse:.2%}, "
+                  f"collapsed_batches={_n_collapsed}/{len(collapse_rates)}")
 
         # Per-question answer storage for rollout logging
         question_answers: Dict[int, Dict[int, str]] = {}  # q_idx -> {local_i -> answer}
