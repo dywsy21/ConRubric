@@ -254,12 +254,18 @@ class MetaRewardFunction:
             _mean_pdiv = np.mean([d.get("point_diversity_bonus", 0.0) for d in _quality_details])
             _mean_tpen = np.mean([d.get("token_length_penalty", 0.0) for d in _quality_details])
             _mean_think = np.mean([d.get("think_leak_penalty", 0.0) for d in _quality_details])
+            _mean_filler = np.mean([d.get("filler_pattern_penalty", 0.0) for d in _quality_details])
+            _mean_tagrep = np.mean([d.get("tag_repetition_penalty", 0.0) for d in _quality_details])
             _n_think_any = sum(1 for d in _quality_details if d.get("think_leak_count", 0) > 0)
+            _n_filler_any = sum(1 for d in _quality_details if d.get("filler_pattern_penalty", 0.0) < 0)
             print(f"[MetaReward] quality_adj_mean={_mean_adj:.3f}, "
                   f"point_div_bonus_mean={_mean_pdiv:.3f}, "
                   f"token_len_penalty_mean={_mean_tpen:.3f}, "
                   f"think_leak_penalty_mean={_mean_think:.3f}, "
-                  f"think_leak_pct={100*_n_think_any/max(len(_quality_details),1):.0f}%")
+                  f"think_leak_pct={100*_n_think_any/max(len(_quality_details),1):.0f}%, "
+                  f"filler_penalty_mean={_mean_filler:.3f}, "
+                  f"filler_pct={100*_n_filler_any/max(len(_quality_details),1):.0f}%, "
+                  f"tag_rep_penalty_mean={_mean_tagrep:.3f}")
 
         # Per-question answer storage for rollout logging
         question_answers: Dict[int, Dict[int, str]] = {}  # q_idx -> {local_i -> answer}
