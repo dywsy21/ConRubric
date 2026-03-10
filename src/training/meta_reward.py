@@ -268,54 +268,94 @@ class MetaRewardFunction:
                   f"tag_rep_penalty_mean={_mean_tagrep:.3f}")
 
         # ── Batch-Level Similarity Penalty ──────────────────────────────
-        import re
-        CRITERION_RE = re.compile(
+        # Detects template collapse: when multiple rubrics for the same
+        # question are structurally near-identical despite cosmetic word changes.
+        # Three signals combined: (A) point-value multiset Jaccard,
+        # (B) content-word Jaccard, (C) content-word bigram Jaccard.
+        _SIM_STOP = frozenset({
+            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to',
+            'for', 'of', 'with', 'by', 'from', 'is', 'are', 'was', 'were',
+            'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did',
+            'that', 'this', 'it', 'its', 'not', 'no', 'as', 'if', 'so',
+            'such', 'very', 'too', 'just', 'also', 'more', 'most', 'some',
+            'any', 'all', 'each', 'every', 'both', 'may', 'might', 'can',
+            'should', 'would', 'could', 'will', 'shall', 'about', 'into',
+            'than', 'then', 'when', 'where', 'how', 'what', 'which', 'who',
+            'especially', 'since', 'user', 'using', 'used', 'ensure',
+            'provide', 'offer', 'include', 'make', 'sure', 'given',
+        })
+        _CRIT_RE_SIM = re.compile(
             r"^\s*[-*]\s*\[([+-]?\d+)\]\s*(.+?)(?:\s*\|\s*tags?\s*:\s*(.*))?$",
             re.IGNORECASE,
         )
+        from collections import Counter as _Counter
         batch_sim_penalties = np.zeros(len(questions), dtype=np.float32)
-        sim_scores_all = []
+        sim_details = []
+
         for q, r_list in q_items:
-            # r_list is composed of tuples (global_idx, rubric_str)
             if len(r_list) < 2:
                 continue
-                
-            # extract fingerprints
-            fingerprints = []
-            for idx, rubric in r_list:
-                fp = set()
+
+            # Per-rubric feature extraction
+            point_sigs_sorted = []  # sorted point-value tuple (for multiset Jaccard)
+            word_sets = []          # set of content words from all criteria
+            bigram_sets = []        # set of content-word bigrams
+            for _, rubric in r_list:
+                pts = []
+                words_list = []
                 for line in rubric.splitlines():
-                    m = CRITERION_RE.match(line)
+                    m = _CRIT_RE_SIM.match(line)
                     if m:
-                        # first 6 words as fingerprint
-                        words = tuple(m.group(2).strip().lower().split()[:6])
-                        if words:
-                            fp.add(words)
-                fingerprints.append(fp)
-            
-            # calculate overlap for each rubric against others in batch
+                        pts.append(int(m.group(1)))
+                        ws = [w for w in re.findall(r'[a-z]{4,}', m.group(2).lower())
+                              if w not in _SIM_STOP]
+                        words_list.extend(ws)
+                point_sigs_sorted.append(tuple(sorted(pts)))
+                word_sets.append(set(words_list))
+                bgs = set()
+                for k in range(len(words_list) - 1):
+                    bgs.add((words_list[k], words_list[k + 1]))
+                bigram_sets.append(bgs)
+
+            # Compute per-rubric mean similarity vs rest of batch
             for i, (global_idx, _) in enumerate(r_list):
-                if not fingerprints[i]:
-                    continue
-                overlaps = []
+                pair_scores = []
                 for j in range(len(r_list)):
-                    if i != j and fingerprints[j]:
-                        intersection = len(fingerprints[i] & fingerprints[j])
-                        num_min = min(len(fingerprints[i]), len(fingerprints[j]))
-                        overlap = intersection / num_min if num_min > 0 else 0
-                        overlaps.append(overlap)
-                mean_overlap = sum(overlaps) / len(overlaps) if overlaps else 0
-                sim_scores_all.append(mean_overlap)
-                
-                # apply penalty if overlap is high
-                if mean_overlap > 0.4:  # Threshold for triggering penalty
-                    penalty = -8.0 * (mean_overlap - 0.4) / 0.6  # Up to -8.0 for 100% overlap
+                    if j == i:
+                        continue
+                    # Signal A: point-value multiset Jaccard
+                    pi, pj = point_sigs_sorted[i], point_sigs_sorted[j]
+                    if pi and pj:
+                        ci, cj = _Counter(pi), _Counter(pj)
+                        pts_sim = sum((ci & cj).values()) / max(sum((ci | cj).values()), 1)
+                    else:
+                        pts_sim = 0.0
+                    # Signal B: content-word Jaccard
+                    wi, wj = word_sets[i], word_sets[j]
+                    word_j = len(wi & wj) / max(len(wi | wj), 1) if (wi and wj) else 0.0
+                    # Signal C: bigram Jaccard
+                    bi, bj = bigram_sets[i], bigram_sets[j]
+                    bg_j = len(bi & bj) / max(len(bi | bj), 1) if (bi and bj) else 0.0
+                    # Combined weighted score
+                    combined = 0.25 * pts_sim + 0.35 * word_j + 0.40 * bg_j
+                    pair_scores.append(combined)
+
+                mean_sim = sum(pair_scores) / len(pair_scores) if pair_scores else 0.0
+                sim_details.append(mean_sim)
+
+                # Penalty: threshold 0.20, linearly to -8.0 at sim=1.0
+                if mean_sim > 0.20:
+                    penalty = -8.0 * (mean_sim - 0.20) / 0.80
                     batch_sim_penalties[global_idx] = penalty
                     quality_adjustments[global_idx] += penalty
-        
-        if sim_scores_all:
-            print(f"[MetaReward] batch_sim_mean={np.mean(sim_scores_all):.2%}, "
-                  f"batch_sim_penalty_mean={np.mean(batch_sim_penalties):.3f}")
+
+        if sim_details:
+            _mean_sim = np.mean(sim_details)
+            _mean_pen = np.mean(batch_sim_penalties)
+            _n_penalized = int(np.sum(batch_sim_penalties < -0.01))
+            print(f"[MetaReward] batch_sim_score_mean={_mean_sim:.2%}, "
+                  f"batch_sim_penalty_mean={_mean_pen:.3f}, "
+                  f"batch_sim_penalized={_n_penalized}/{len(batch_sim_penalties)}")
 
         # Per-question answer storage for rollout logging
         question_answers: Dict[int, Dict[int, str]] = {}  # q_idx -> {local_i -> answer}
