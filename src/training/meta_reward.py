@@ -267,6 +267,56 @@ class MetaRewardFunction:
                   f"filler_pct={100*_n_filler_any/max(len(_quality_details),1):.0f}%, "
                   f"tag_rep_penalty_mean={_mean_tagrep:.3f}")
 
+        # ── Batch-Level Similarity Penalty ──────────────────────────────
+        import re
+        CRITERION_RE = re.compile(
+            r"^\s*[-*]\s*\[([+-]?\d+)\]\s*(.+?)(?:\s*\|\s*tags?\s*:\s*(.*))?$",
+            re.IGNORECASE,
+        )
+        batch_sim_penalties = np.zeros(len(questions), dtype=np.float32)
+        sim_scores_all = []
+        for q, r_list in q_items:
+            # r_list is composed of tuples (global_idx, rubric_str)
+            if len(r_list) < 2:
+                continue
+                
+            # extract fingerprints
+            fingerprints = []
+            for idx, rubric in r_list:
+                fp = set()
+                for line in rubric.splitlines():
+                    m = CRITERION_RE.match(line)
+                    if m:
+                        # first 6 words as fingerprint
+                        words = tuple(m.group(2).strip().lower().split()[:6])
+                        if words:
+                            fp.add(words)
+                fingerprints.append(fp)
+            
+            # calculate overlap for each rubric against others in batch
+            for i, (global_idx, _) in enumerate(r_list):
+                if not fingerprints[i]:
+                    continue
+                overlaps = []
+                for j in range(len(r_list)):
+                    if i != j and fingerprints[j]:
+                        intersection = len(fingerprints[i] & fingerprints[j])
+                        num_min = min(len(fingerprints[i]), len(fingerprints[j]))
+                        overlap = intersection / num_min if num_min > 0 else 0
+                        overlaps.append(overlap)
+                mean_overlap = sum(overlaps) / len(overlaps) if overlaps else 0
+                sim_scores_all.append(mean_overlap)
+                
+                # apply penalty if overlap is high
+                if mean_overlap > 0.4:  # Threshold for triggering penalty
+                    penalty = -8.0 * (mean_overlap - 0.4) / 0.6  # Up to -8.0 for 100% overlap
+                    batch_sim_penalties[global_idx] = penalty
+                    quality_adjustments[global_idx] += penalty
+        
+        if sim_scores_all:
+            print(f"[MetaReward] batch_sim_mean={np.mean(sim_scores_all):.2%}, "
+                  f"batch_sim_penalty_mean={np.mean(batch_sim_penalties):.3f}")
+
         # Per-question answer storage for rollout logging
         question_answers: Dict[int, Dict[int, str]] = {}  # q_idx -> {local_i -> answer}
 
