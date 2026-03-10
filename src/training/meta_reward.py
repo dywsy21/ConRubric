@@ -384,6 +384,15 @@ class MetaRewardFunction:
                     g_idx = r_list[i][0]
                     batch_sim_penalties[g_idx] += collapse_pen
                     quality_adjustments[g_idx] += collapse_pen
+                # Diversity bonus: reward rubrics that break out of the
+                # collapsed cluster.  This creates a differential signal
+                # for PPO (uniform penalties cancel in advantage estimation).
+                diversity_bonus = 2.0
+                for i in range(len(r_list)):
+                    if i not in largest_cluster:
+                        g_idx = r_list[i][0]
+                        batch_sim_penalties[g_idx] += diversity_bonus
+                        quality_adjustments[g_idx] += diversity_bonus
 
         if sim_details:
             _mean_sim = np.mean(sim_details)
