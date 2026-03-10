@@ -75,6 +75,14 @@ class RubricQualityConfig:
     # Minimum run of consecutive digit/random chars to trigger detection
     garbage_char_run_min: int = int(os.getenv("GRM_GARBAGE_CHAR_RUN_MIN", "10"))
 
+    # Tag repetition penalty: penalizes criteria whose tags are degenerate
+    # word repetition (e.g., "empathy, empathy, empathy, empathy, support").
+    # For each criterion, if unique_tags / total_tags < tag_dedup_threshold,
+    # it contributes to the penalty.  Penalty = lambda * mean(1 - dedup_ratio)
+    # across all criteria with degenerate tags.
+    lambda_tag_rep: float = float(os.getenv("GRM_LAMBDA_TAG_REP", "1.0"))
+    tag_dedup_threshold: float = float(os.getenv("GRM_TAG_DEDUP_THRESHOLD", "0.6"))
+
     # Whether to enable quality scoring at all (master switch)
     enabled: bool = os.getenv("GRM_RUBRIC_QUALITY", "true").lower() in ("1", "true", "yes")
 
@@ -296,10 +304,19 @@ def score_rubric_quality(
     # Penalize criteria that follow the "Models answer with ..." template
     # or similar boilerplate filler patterns.  These are a sign the model
     # is generating a generic template instead of question-specific rubric.
+    # Expanded to catch "Respond with empathy/compassion/understanding" —
+    # the dominant template-collapse pattern observed at step 700-716.
     _FILLER_RE = re.compile(
         r"(?i)^models?\s+answers?\s+with\b"
         r"|^(?:the\s+)?(?:response|answer|model)\s+(?:shows?|demonstrates?|maintains?|provides?)\s+"
-        r"(?:empathy|compassion|supportive|appropriate|sensitivity)",
+        r"(?:empathy|compassion|supportive|appropriate|sensitivity)"
+        # "Respond with empathy/compassion/understanding/sensitivity/kindness"
+        r"|^respond\s+with\s+(?:empathy|compassion|understanding|sensitivity|kindness)"
+        # "Show/display/express empathy/compassion/..."
+        r"|^(?:show|display|express|convey)\s+(?:empathy|compassion|understanding|sensitivity|kindness)"
+        # "Acknowledge the user's/patient's feelings/emotions/situation"
+        r"|^acknowledge\s+(?:the\s+)?(?:user|patient|person|individual)(?:'?s?)?\s+"
+        r"(?:feeling|emotion|situation|concern|struggle|experience)",
     )
     n_filler = sum(1 for c in criteria if _FILLER_RE.search(c.text))
     if n_filler > 0 and n > 0:
@@ -382,9 +399,28 @@ def score_rubric_quality(
     detail["garbage_chars_penalty"] = garbage_penalty
     detail["garbage_char_runs"] = len(garbage_runs)
 
+    # ── 10. Tag repetition penalty ─────────────────────────────────
+    # Detect degenerate tags where the model repeats the same word multiple
+    # times: e.g., "empathy, empathy, empathy, empathy, support".
+    # For each criterion with ≥2 tags, compute dedup_ratio = unique/total.
+    # If dedup_ratio < threshold, the criterion has degenerate tags.
+    # Penalty = -lambda * mean(1 - dedup_ratio) over degenerate criteria.
+    degen_scores = []
+    for c in criteria:
+        if len(c.tags) >= 2:
+            lowered = [t.lower() for t in c.tags]
+            dedup_ratio = len(set(lowered)) / len(lowered)
+            if dedup_ratio < config.tag_dedup_threshold:
+                degen_scores.append(1.0 - dedup_ratio)
+    if degen_scores:
+        tag_rep_penalty = -config.lambda_tag_rep * (sum(degen_scores) / len(degen_scores))
+    else:
+        tag_rep_penalty = 0.0
+    detail["tag_repetition_penalty"] = tag_rep_penalty
+
     total = (rep_penalty + div_bonus + len_penalty + trunc_penalty
              + token_len_penalty + point_div_bonus + filler_penalty
-             + think_penalty + garbage_penalty)
+             + think_penalty + garbage_penalty + tag_rep_penalty)
 
     return RubricQualityResult(
         n_criteria=n,
