@@ -13,13 +13,22 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT_DIR/.venv/bin/activate"
 
-# Load .env
+# Save CLI overrides BEFORE sourcing .env (which may clobber them)
+_CLI_NUM_SAMPLES="${NUM_SAMPLES:-}"
+_CLI_EVAL_BATCH="${EVAL_BATCH_SIZE:-}"
+_CLI_EVAL_WORKERS="${EVAL_WORKERS:-}"
+_CLI_PROXY="${PROXY_URL:-}"
+_CLI_BENCH_LIST="${BENCH_LIST:-}"
+_CLI_BENCH_DIR="${BENCH_BASE_DIR:-}"
+_CLI_GPU="${BENCH_GPU:-}"
+
+# Load .env (provides ORACLE_*, HF_HOME, etc.)
 if [[ -f "$ROOT_DIR/.env" ]]; then
   set -a; source "$ROOT_DIR/.env"; set +a
 fi
 
-# Proxy: needed for HF dataset downloads, but exclude localhost (judge API)
-PROXY_URL="${PROXY_URL:-http://127.0.0.1:7897}"
+# Restore CLI overrides, falling back to .env values, then to defaults
+PROXY_URL="${_CLI_PROXY:-${PROXY_URL:-http://127.0.0.1:7897}}"
 export HTTP_PROXY="$PROXY_URL"
 export HTTPS_PROXY="$PROXY_URL"
 export ALL_PROXY="$PROXY_URL"
@@ -29,12 +38,12 @@ export all_proxy="$PROXY_URL"
 export NO_PROXY="localhost,127.0.0.1"
 export no_proxy="localhost,127.0.0.1"
 
-NUM_SAMPLES="${NUM_SAMPLES:-192}"
-BENCHMARKS="${BENCH_LIST:-rewardbench ppe rmb healthbench_rubric}"
-EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-32}"
-EVAL_WORKERS="${EVAL_WORKERS:-8}"
-BENCH_BASE_DIR="${BENCH_BASE_DIR:-out/bench}"
-GPU="${BENCH_GPU:-0}"
+NUM_SAMPLES="${_CLI_NUM_SAMPLES:-192}"
+BENCHMARKS="${_CLI_BENCH_LIST:-rewardbench ppe rmb healthbench_rubric}"
+EVAL_BATCH_SIZE="${_CLI_EVAL_BATCH:-32}"
+EVAL_WORKERS="${_CLI_EVAL_WORKERS:-8}"
+BENCH_BASE_DIR="${_CLI_BENCH_DIR:-out/bench/compare}"
+GPU="${_CLI_GPU:-0}"
 
 LOG_DIR="$BENCH_BASE_DIR/logs"
 mkdir -p "$LOG_DIR"
