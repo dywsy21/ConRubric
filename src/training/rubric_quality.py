@@ -310,8 +310,8 @@ def score_rubric_quality(
         r"(?i)^models?\s+answers?\s+with\b"
         r"|^(?:the\s+)?(?:response|answer|model)\s+(?:shows?|demonstrates?|maintains?|provides?)\s+"
         r"(?:empathy|compassion|supportive|appropriate|sensitivity)"
-        # "Respond with empathy/compassion/understanding/sensitivity/kindness"
-        r"|^respond\s+with\s+(?:empathy|compassion|understanding|sensitivity|kindness)"
+        # "Respond with empathy/compassion/understanding/sensitivity/kindness/sympathy"
+        r"|^respond\s+with\s+(?:empathy|compassion|understanding|sensitivity|kindness|sympathy)"
         # "Show/display/express empathy/compassion/..."
         r"|^(?:show|display|express|convey)\s+(?:empathy|compassion|understanding|sensitivity|kindness)"
         # "Acknowledge the user's/patient's feelings/emotions/situation"
@@ -418,9 +418,36 @@ def score_rubric_quality(
         tag_rep_penalty = 0.0
     detail["tag_repetition_penalty"] = tag_rep_penalty
 
+    # ── 11. Extreme point-value penalty ────────────────────────────
+    # Rubric spec requires points in [-10, 10].  Values like [-105],
+    # [1000] indicate degenerate model output.  Hard penalty per
+    # out-of-range criterion, scaled by fraction of degenerate criteria.
+    _POINT_LIMIT = 10  # absolute max allowed
+    n_extreme = sum(1 for c in criteria if abs(c.points) > _POINT_LIMIT)
+    if n_extreme > 0 and n > 0:
+        extreme_pts_penalty = -3.0 * (n_extreme / n)
+    else:
+        extreme_pts_penalty = 0.0
+    detail["extreme_points_penalty"] = extreme_pts_penalty
+
+    # ── 12. Non-ASCII character penalty ────────────────────────────
+    # Detect ANY non-ASCII character in the rubric text.  These appear
+    # when the model enters degenerate sampling (CJK, Cyrillic, Arabic,
+    # Armenian, etc. mixed into English rubrics).  Even a single non-
+    # ASCII char signals output corruption.
+    _NON_ASCII_RE = re.compile(r'[^\x00-\x7f]')
+    non_ascii_count = len(_NON_ASCII_RE.findall(rubric_text))
+    if non_ascii_count > 0:
+        # Scale: -1.0 for 1 char, up to -3.0 for 5+ chars
+        non_ascii_penalty = -min(1.0 + 0.5 * (non_ascii_count - 1), 3.0)
+    else:
+        non_ascii_penalty = 0.0
+    detail["non_ascii_penalty"] = non_ascii_penalty
+
     total = (rep_penalty + div_bonus + len_penalty + trunc_penalty
              + token_len_penalty + point_div_bonus + filler_penalty
-             + think_penalty + garbage_penalty + tag_rep_penalty)
+             + think_penalty + garbage_penalty + tag_rep_penalty
+             + extreme_pts_penalty + non_ascii_penalty)
 
     return RubricQualityResult(
         n_criteria=n,

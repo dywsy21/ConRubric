@@ -258,6 +258,10 @@ class MetaRewardFunction:
             _mean_tagrep = np.mean([d.get("tag_repetition_penalty", 0.0) for d in _quality_details])
             _n_think_any = sum(1 for d in _quality_details if d.get("think_leak_count", 0) > 0)
             _n_filler_any = sum(1 for d in _quality_details if d.get("filler_pattern_penalty", 0.0) < 0)
+            _mean_extreme = np.mean([d.get("extreme_points_penalty", 0.0) for d in _quality_details])
+            _mean_nonascii = np.mean([d.get("non_ascii_penalty", 0.0) for d in _quality_details])
+            _n_extreme = sum(1 for d in _quality_details if d.get("extreme_points_penalty", 0.0) < -0.01)
+            _n_nonascii = sum(1 for d in _quality_details if d.get("non_ascii_penalty", 0.0) < -0.01)
             print(f"[MetaReward] quality_adj_mean={_mean_adj:.3f}, "
                   f"point_div_bonus_mean={_mean_pdiv:.3f}, "
                   f"token_len_penalty_mean={_mean_tpen:.3f}, "
@@ -265,7 +269,9 @@ class MetaRewardFunction:
                   f"think_leak_pct={100*_n_think_any/max(len(_quality_details),1):.0f}%, "
                   f"filler_penalty_mean={_mean_filler:.3f}, "
                   f"filler_pct={100*_n_filler_any/max(len(_quality_details),1):.0f}%, "
-                  f"tag_rep_penalty_mean={_mean_tagrep:.3f}")
+                  f"tag_rep_penalty_mean={_mean_tagrep:.3f}, "
+                  f"extreme_pts_penalty_mean={_mean_extreme:.3f} ({_n_extreme}/{len(_quality_details)}), "
+                  f"non_ascii_penalty_mean={_mean_nonascii:.3f} ({_n_nonascii}/{len(_quality_details)})")
 
         # ── Batch-Level Similarity Penalty ──────────────────────────────
         # Detects template collapse: when multiple rubrics for the same
