@@ -31,8 +31,8 @@ export no_proxy="localhost,127.0.0.1"
 
 NUM_SAMPLES="${NUM_SAMPLES:-192}"
 BENCHMARKS="${BENCH_LIST:-rewardbench ppe rmb healthbench_rubric}"
-EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-24}"
-EVAL_WORKERS="${EVAL_WORKERS:-6}"
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-32}"
+EVAL_WORKERS="${EVAL_WORKERS:-8}"
 BENCH_BASE_DIR="${BENCH_BASE_DIR:-out/bench}"
 GPU="${BENCH_GPU:-0}"
 

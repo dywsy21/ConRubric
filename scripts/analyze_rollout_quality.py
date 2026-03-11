@@ -275,12 +275,15 @@ def main():
         scored.append((quality, r["step"], r))
 
     scored.sort(reverse=True)
-    print(f"\n{'Rank':>4} | {'Step':>5} | {'Score':>7} | {'Reward':>7} | {'Collapse':>8} | {'XPts%':>5} | {'NonASC%':>7}")
-    print("-" * 80)
-    for rank, (score, step, r) in enumerate(scored[:15], 1):
+    # Show all when explicitly selecting steps, otherwise top 15
+    show_n = len(scored) if (args.steps or len(scored) <= 20) else 15
+    print(f"\n{'Rank':>4} | {'Step':>5} | {'Score':>7} | {'Reward':>7} | {'Collapse':>8} | {'XPts%':>5} | {'NonASC%':>7} | {'Fill%':>5} | {'Garb%':>5}")
+    print("-" * 100)
+    for rank, (score, step, r) in enumerate(scored[:show_n], 1):
         print(f"{rank:>4} | {step:>5} | {score:>7.2f} | {r['mean_reward']:>7.2f} | "
               f"{r['collapse_rate']:>7.1%} | {r['pct_extreme_pts']:>5.1f} | "
-              f"{r['pct_non_ascii']:>7.1f}")
+              f"{r['pct_non_ascii']:>7.1f} | {r['pct_filler']:>5.1f} | "
+              f"{r['pct_garbage']:>5.1f}")
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ PPO_RAY_RUNTIME_ENV = {
         "TOKENIZERS_PARALLELISM": "true",
         "NCCL_DEBUG": "WARN",
         "VLLM_LOGGING_LEVEL": "WARN",
+        "OMP_NUM_THREADS": "1",  # vLLM v1 requires positive int; Docker may report 0 CPUs
         "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true",
         # symmetric memory allreduce not work properly in spmd mode
         "VLLM_ALLREDUCE_USE_SYMM_MEM": "0",

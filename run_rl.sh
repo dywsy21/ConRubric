@@ -31,7 +31,6 @@ fi
 # Disable proxies — models are local/LAN, no internet needed
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy
 export HYDRA_FULL_ERROR=1
-export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"  # vLLM v1 requires positive int
 
 # ── Parse arguments ───────────────────────────────────────────────
 STAGES=""
