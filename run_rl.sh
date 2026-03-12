@@ -77,37 +77,10 @@ function should_run() {
 }
 
 # ── Resolve the best input model ─────────────────────────────────
-# Priority: explicit GRM_MODEL_NAME (if it's a local path) > SFT checkpoint > BASE_MODEL
+# Use GRM_MODEL_NAME directly (base model).
+# SFT checkpoint resolution is disabled — RL starts from base model.
 RESOLVED_MODEL="${GRM_MODEL_NAME:-}"
-
-function resolve_sft_model() {
-  local sft_dir="${SFT_OUTPUT_DIR:-out/sft}"
-  if [[ -f "$sft_dir/latest_checkpointed_iteration.txt" ]]; then
-    local step
-    step=$(cat "$sft_dir/latest_checkpointed_iteration.txt" | tr -d '[:space:]')
-    local cand="$sft_dir/global_step_${step}/huggingface"
-    if [[ -d "$cand" && -f "$cand/config.json" ]]; then
-      echo "$cand"
-      return 0
-    fi
-  fi
-  return 1
-}
-
-# If GRM_MODEL_NAME is a HuggingFace hub name (contains /), try upgrading to SFT checkpoint
-if [[ "$RESOLVED_MODEL" == *"/"* && ! -d "$RESOLVED_MODEL" ]]; then
-  SFT_MODEL=$(resolve_sft_model 2>/dev/null || true)
-  if [[ -n "$SFT_MODEL" ]]; then
-    echo "[INFO] Found SFT checkpoint, using as RL input: $SFT_MODEL"
-    RESOLVED_MODEL="$SFT_MODEL"
-    # Override for the Hydra config
-    HYDRA_ARGS+=("actor_rollout_ref.model.path=$RESOLVED_MODEL")
-  else
-    echo "[INFO] No SFT checkpoint found, using base model: $RESOLVED_MODEL"
-  fi
-else
-  echo "[INFO] Using model: $RESOLVED_MODEL"
-fi
+echo "[INFO] Using base model for RL (skipping SFT): $RESOLVED_MODEL"
 
 echo "RL algorithm: ${RL_ALGORITHM:-dapo}"
 

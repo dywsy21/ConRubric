@@ -95,9 +95,6 @@ class MetaConsensusRewardManager(AbstractRewardManager):
             rubrics.append(response_str)
             valid_response_lengths.append(max(valid_response_len, 1))
 
-        # All garbage detection is delegated to the Solver model, which
-        # outputs <GARBAGE_RUBRIC> when it receives a nonsensical rubric.
-        # See meta_reward.py _coordinate_question() for the detection logic.
         global_step = None
         if hasattr(data, "meta_info") and data.meta_info:
             global_step = data.meta_info.get("global_steps", None)
@@ -117,7 +114,12 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         )
 
         for i, score in enumerate(scalar_rewards):
-            rewards[i, valid_response_lengths[i] - 1] = float(score)
+            # Per-token reward: apply the same reward uniformly across
+            # all valid response tokens.  This gives every token the
+            # discrimination signal, making training more stable than
+            # concentrating the entire reward at the last token.
+            resp_len = valid_response_lengths[i]
+            rewards[i, :resp_len] = float(score)
             reward_extra_info["score"].append(float(score))
 
         if return_dict:

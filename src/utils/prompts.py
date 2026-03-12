@@ -29,7 +29,9 @@ RUBRIC_GENERATION_PROMPT = (
     "5. Each criterion must be UNIQUE — do not repeat the same criterion "
     "with minor rewording. If you find yourself writing the same idea again, stop.\n\n"
     "Output each criterion on its own line in this format:\n"
-    "- [+/-points] criterion | tags: ...\n\n"
+    "- [+] criterion (for positive criteria: what the answer should do)\n"
+    "- [-] criterion (for negative criteria: mistakes or harmful behaviors)\n"
+    "Optionally add tags: - [+] criterion | tags: tag1, tag2\n\n"
     "Question:\n{question}"
 )
 
@@ -40,19 +42,8 @@ You are a helpful assistant. Please answer the following question.
 Question:
 {question}
 
-Please ensure your answer follows these evaluation rubric:
+Please ensure your answer follows these evaluation criteria:
 {rubric}
-
-IMPORTANT: If the rubric above is garbled, nonsensical, repetitive garbage, or completely unrelated to the question, begin your response with the marker <GARBAGE_RUBRIC> on its own line, then still answer the question to the best of your ability.
-If the rubric is NOT garbage, check whether it is a generic template that could apply to any question in the same broad domain.
-To decide, scan each criterion for a SPECIFIC reference to the question's actual subject — the named disease, procedure, entity, chemical, body part, scenario, or concept. Ignore formatting style like "Models answer with...".
-These do NOT count as question-specific:
-  - Domain labels in tags or text: "health", "clinical", "safety", "medical", "life", "communication"
-  - Abstract references: "the question", "the topic", "the user's situation", "the current topic"
-  - Generic quality phrases: "clarity", "accuracy", "actionable advice", "empathy", "next steps"
-A criterion IS question-specific only if it names something you could NOT copy-paste unchanged into a rubric for a completely different question in the same field (e.g., it says "mammogram" or "parathyroid" or "aspirin dosage" or "A1C" — an actual subject term from the question).
-If **NOT A SINGLE** criterion in the entire rubric names the actual subject of the question, begin your response with the marker <GENERAL_RUBRIC> on its own line, then still answer the question following the rubric.
-Otherwise, answer the question normally — do NOT flag rubrics where at least one criterion references the specific topic.
 
 Answer:
 """
@@ -111,11 +102,15 @@ Output a single integer from 0 to 10 representing the overall score. Output ONLY
 """
 
 # ── Oracle: batch-evaluate multiple answers against ONE rubric ────────────
-# Used in RL meta-reward to get *relative* scores: seeing all answers at once
-# lets the judge calibrate scores against each other, making the ranking signal
-# much more meaningful than scoring each answer in isolation.
+# Used in RL meta-reward: each rubric evaluates all other answers individually.
+# Scores are absolute (not relative), allowing variance computation across answers.
 BATCH_RUBRIC_EVALUATION_PROMPT = """
-You are an expert evaluator. Rate each of the {n} answers below on a 0-10 scale according to the rubric. Compare them against each other for calibration.
+You are an expert evaluator. Score each of the {n} answers below on a 0-10 scale according to the rubric.
+
+Scoring rules:
+- For [+] criteria (positive): 10 = criterion fully met, 0 = completely absent
+- For [-] criteria (negative): 0 = the bad behavior is fully present, 10 = the bad behavior is completely absent (good)
+- Score each answer independently on its own merits.
 
 Question:
 {question}

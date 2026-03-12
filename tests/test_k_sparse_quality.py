@@ -10,8 +10,6 @@ from src.training.matrix_completion import als_matrix_completion
 from src.training.rubric_quality import (
     RubricQualityConfig,
     RubricQualityResult,
-    count_near_duplicates,
-    jaccard_similarity,
     parse_rubric_text,
     score_rubric_quality,
 )
@@ -127,8 +125,8 @@ class TestRubricParsing:
     def test_parse_standard(self):
         criteria = parse_rubric_text(GOOD_RUBRIC)
         assert len(criteria) == 6
-        assert criteria[0].points == 5
-        assert criteria[3].points == -3
+        assert criteria[0].sign == "+"
+        assert criteria[3].sign == "-"
         assert "safety" in criteria[3].tags
 
     def test_parse_empty(self):
@@ -139,73 +137,36 @@ class TestRubricParsing:
         criteria = parse_rubric_text("- [+3] Simple criterion\n")
         assert len(criteria) == 1
         assert criteria[0].tags == []
-        assert criteria[0].points == 3
+        assert criteria[0].sign == "+"
 
-
-class TestSimilarity:
-    def test_identical(self):
-        assert jaccard_similarity("hello world", "hello world") == 1.0
-
-    def test_completely_different(self):
-        sim = jaccard_similarity("apples and oranges", "quantum mechanics theory")
-        assert sim < 0.15
-
-    def test_paraphrase_detected(self):
-        a = "Provides a clear and direct answer to the question"
-        b = "Gives a clear, direct response to the question asked"
-        sim = jaccard_similarity(a, b)
-        assert sim > 0.35  # Should detect substantial overlap via word-bag
-
-
-class TestDuplicateDetection:
-    def test_no_duplicates(self):
-        criteria = parse_rubric_text(GOOD_RUBRIC)
-        n_dup = count_near_duplicates(criteria, threshold=0.55)
-        assert n_dup == 0
-
-    def test_detects_repetition(self):
-        criteria = parse_rubric_text(REPETITIVE_RUBRIC)
-        n_dup = count_near_duplicates(criteria, threshold=0.35)
-        # Should detect at least 2 duplicates (5 versions of same idea)
-        assert n_dup >= 2, f"Expected ≥2 duplicates, got {n_dup}"
+    def test_parse_new_format(self):
+        """Test parsing [+]/[-] format without numeric points."""
+        rubric = "- [+] Good criterion\n- [-] Bad criterion\n"
+        criteria = parse_rubric_text(rubric)
+        assert len(criteria) == 2
+        assert criteria[0].sign == "+"
+        assert criteria[1].sign == "-"
 
 
 class TestRubricQualityScoring:
     def _make_config(self, **kwargs) -> RubricQualityConfig:
         defaults = dict(
-            lambda_rep=0.3, lambda_div=0.15, lambda_len=0.2,
-            min_criteria=3, max_criteria=15, similarity_threshold=0.55,
+            lambda_len=0.2,
+            min_criteria=3, max_criteria=15,
+            lambda_token_len=1.5, token_soft_max=900, token_hard_max=1024,
             enabled=True,
         )
         defaults.update(kwargs)
         return RubricQualityConfig(**defaults)
 
-    def test_good_rubric_positive_adjustment(self):
-        """A well-formed rubric with negatives should get a positive total."""
+    def test_good_rubric_zero_adjustment(self):
+        """A well-formed rubric within bounds should get zero adjustment."""
         cfg = self._make_config()
         result = score_rubric_quality(GOOD_RUBRIC, cfg)
         assert result.n_criteria == 6
         assert result.n_negative == 2
-        assert result.has_negative
-        assert result.n_duplicates == 0
-        assert not result.is_truncated
-        # Expect: 0 rep + 0.15 div + 0 len + 0 trunc = 0.15
-        assert result.total_adjustment > 0
-        assert abs(result.total_adjustment - 0.15) < 0.05
-
-    def test_repetitive_rubric_penalty(self):
-        """Repetitive rubric should get negative adjustment."""
-        cfg = self._make_config(similarity_threshold=0.35)
-        result = score_rubric_quality(REPETITIVE_RUBRIC, cfg)
-        assert result.n_duplicates >= 2, f"Expected ≥2 duplicates, got {result.n_duplicates}"
-        assert result.detail["repetition_penalty"] < 0
-        assert result.detail["diversity_bonus"] == 0  # no negatives
-
-    def test_no_negatives_no_diversity_bonus(self):
-        cfg = self._make_config()
-        result = score_rubric_quality(NO_NEGATIVES_RUBRIC, cfg)
-        assert not result.has_negative
-        assert result.detail["diversity_bonus"] == 0.0
+        # No length penalty (6 is between 3 and 15)
+        assert result.total_adjustment == 0.0
 
     def test_too_many_criteria_penalty(self):
         cfg = self._make_config(max_criteria=15)
@@ -219,13 +180,15 @@ class TestRubricQualityScoring:
         result = score_rubric_quality(rubric, cfg)
         assert result.detail["length_penalty"] < 0
 
-    def test_disabled_returns_zero(self):
-        cfg = self._make_config(enabled=False)
-        # Even though we still call the function, the manager should
-        # check cfg.enabled before applying. Test the scoring directly.
-        result = score_rubric_quality(GOOD_RUBRIC, cfg)
-        # The function itself doesn't check enabled; the caller does.
-        assert result.total_adjustment != 0  # Scoring still works
+    def test_token_length_penalty(self):
+        cfg = self._make_config()
+        result = score_rubric_quality(GOOD_RUBRIC, cfg, token_count=950)
+        assert result.detail["token_length_penalty"] < 0
+
+    def test_no_token_penalty_under_soft_max(self):
+        cfg = self._make_config()
+        result = score_rubric_quality(GOOD_RUBRIC, cfg, token_count=800)
+        assert result.detail["token_length_penalty"] == 0.0
 
     def test_empty_rubric(self):
         cfg = self._make_config()
@@ -321,37 +284,23 @@ class TestKSparseSelection:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestCombinedReward:
-    """Test the combined reward = consensus + quality_adjustment."""
+    """Test the combined reward = discrimination + quality_adjustment."""
 
     def test_quality_adjustment_range(self):
         """Quality adjustment should be bounded and reasonable."""
         cfg = RubricQualityConfig(
-            lambda_rep=0.3, lambda_div=0.15, lambda_len=0.2,
+            lambda_len=0.2,
             min_criteria=3, max_criteria=15,
-            similarity_threshold=0.55, enabled=True,
+            lambda_token_len=1.5, token_soft_max=900, token_hard_max=1024,
+            enabled=True,
         )
-        # Best case: good rubric with negatives, no dups, right length
+        # Good rubric within bounds: zero adjustment
         result = score_rubric_quality(GOOD_RUBRIC, cfg)
-        assert -1.0 <= result.total_adjustment <= 0.5
+        assert -2.0 <= result.total_adjustment <= 0.5
 
-        # Worst case: 100% duplicates, no negatives, way too long
-        worst = score_rubric_quality(REPETITIVE_RUBRIC + REPETITIVE_RUBRIC, cfg)
-        assert worst.total_adjustment < 0
-
-    def test_consensus_dominates(self):
-        """Quality adjustments should be small relative to typical consensus
-        rewards (0-10 scale) so they shape but don't override the signal."""
-        cfg = RubricQualityConfig(
-            lambda_rep=0.3, lambda_div=0.15, lambda_len=0.2,
-            min_criteria=3, max_criteria=15,
-            similarity_threshold=0.55, enabled=True,
-        )
-        # Typical reward is ~5.0 on [0, 10].  Quality adjustment max ~0.45
-        good = score_rubric_quality(GOOD_RUBRIC, cfg)
-        bad = score_rubric_quality(REPETITIVE_RUBRIC, cfg)
-        total_range = abs(good.total_adjustment) + abs(bad.total_adjustment)
-        assert total_range < 2.0, \
-            f"Quality adjustments too large ({total_range}), would overwhelm consensus"
+        # Long rubric: gets length penalty
+        long_result = score_rubric_quality(LONG_RUBRIC, cfg)
+        assert long_result.total_adjustment < 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
