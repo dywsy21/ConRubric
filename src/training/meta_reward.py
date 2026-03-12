@@ -143,6 +143,9 @@ class MetaRewardFunction:
         self._oracle = None
         self._solver = None
         self._step_counter = 0
+        # Per-criterion duplication weights for token-level reward scaling.
+        # Populated by compute_reward: {global_idx: [1/cluster_size_k, ...]}
+        self._dup_criterion_weights: Dict[int, List[float]] = {}
 
     @property
     def oracle(self):
@@ -240,6 +243,7 @@ class MetaRewardFunction:
         print(f"[MetaReward] Processing {len(q_items)} unique questions")
 
         rewards = torch.zeros(len(questions), dtype=torch.float32)
+        self._dup_criterion_weights = {}  # reset per batch
 
         # ── Pre-compute rubric quality adjustments ─────────────────────
         quality_adjustments = np.zeros(len(questions), dtype=np.float32)
@@ -431,6 +435,18 @@ class MetaRewardFunction:
                     # Find unique (non-redundant) criteria within this rollout
                     unique_reps, clusters = _find_unique_criteria(j_crit, SPEARMAN_THRESHOLD)
                     n_unique = len(unique_reps)
+
+                    # ── Per-criterion duplication weights ─────────────
+                    # For token-level reward scaling: tokens of a criterion
+                    # in a cluster of size c get reward / c.
+                    crit_cluster_sizes: Dict[int, int] = {}
+                    for _rep, _members in clusters.items():
+                        for _m in _members:
+                            crit_cluster_sizes[_m] = len(_members)
+                    self._dup_criterion_weights[indices[j]] = [
+                        1.0 / crit_cluster_sizes.get(k, 1)
+                        for k in range(n_total_crit)
+                    ]
 
                     # ── Consensus: when rollout j evaluates answer i, the
                     # score = mean of unique criteria scores for answer i.

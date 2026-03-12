@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
-from typing import Any
+from typing import Any, List, Optional
 
 import torch
 
 from src.training.meta_reward import MetaRewardFunction
+from src.training.rubric_quality import _CRITERION_RE
 from verl import DataProto
 from verl.workers.reward_manager.abstract import AbstractRewardManager
 from verl.workers.reward_manager.registry import REWARD_MANAGER_REGISTRY
@@ -114,17 +116,93 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         )
 
         for i, score in enumerate(scalar_rewards):
-            # Per-token reward: apply the same reward uniformly across
-            # all valid response tokens.  This gives every token the
-            # discrimination signal, making training more stable than
-            # concentrating the entire reward at the last token.
             resp_len = valid_response_lengths[i]
-            rewards[i, :resp_len] = float(score)
+            dup_weights = self.reward_fn._dup_criterion_weights.get(i)
+            has_dups = dup_weights and any(w < 1.0 - 1e-6 for w in dup_weights)
+
+            if has_dups:
+                # Token-level duplication penalty: tokens belonging to a
+                # criterion repeated n times get reward / n.
+                token_weights = self._compute_dup_token_weights(
+                    rubrics[i], dup_weights, resp_len,
+                )
+                if token_weights is not None:
+                    for j_tok in range(resp_len):
+                        w = token_weights[j_tok] if j_tok < len(token_weights) else 1.0
+                        rewards[i, j_tok] = float(score) * w
+                    eff = sum(token_weights[:resp_len]) / max(resp_len, 1)
+                    print(f"[RewardManager] rollout {i}: dup penalty applied, "
+                          f"eff_weight={eff:.3f}, {sum(1 for w in dup_weights if w < 1-1e-6)}/{len(dup_weights)} dup criteria")
+                else:
+                    rewards[i, :resp_len] = float(score)
+            else:
+                rewards[i, :resp_len] = float(score)
+
             reward_extra_info["score"].append(float(score))
 
         if return_dict:
             return {"reward_tensor": rewards, "reward_extra_info": reward_extra_info}
         return rewards
+
+    # ── Token-level duplication penalty ────────────────────────────────
+
+    def _compute_dup_token_weights(
+        self,
+        response_str: str,
+        crit_dup_weights: List[float],
+        resp_token_len: int,
+    ) -> Optional[List[float]]:
+        """Map per-criterion duplication weights to per-token weights.
+
+        For each criterion line in *response_str*, tokens belonging to a
+        criterion in a Spearman-dedup cluster of size *c* get weight 1/c.
+        Non-criterion tokens (preamble, blank lines, etc.) keep weight 1.0.
+
+        Returns None if mapping fails (fallback to uniform reward).
+        """
+        # Step 1: build char-level weights ──────────────────────────────
+        lines = response_str.split("\n")
+        char_weights = [1.0] * (len(response_str) + 1)  # +1 safety
+        crit_idx = 0
+        char_offset = 0
+        has_penalty = False
+        for line in lines:
+            line_start = char_offset
+            line_end = char_offset + len(line)
+            if _CRITERION_RE.match(line):
+                if crit_idx < len(crit_dup_weights):
+                    w = crit_dup_weights[crit_idx]
+                    if w < 1.0 - 1e-6:
+                        has_penalty = True
+                        for c in range(line_start, min(line_end, len(response_str))):
+                            char_weights[c] = w
+                crit_idx += 1
+            char_offset = line_end + 1  # +1 for '\n'
+
+        if not has_penalty:
+            return None  # no duplicates → uniform reward
+
+        # Step 2: map chars → tokens via offset_mapping ─────────────────
+        try:
+            encoding = self.tokenizer(
+                response_str,
+                return_offsets_mapping=True,
+                add_special_tokens=False,
+            )
+            offsets = encoding["offset_mapping"]
+            token_weights: List[float] = []
+            for s, e in offsets:
+                if s >= e:
+                    token_weights.append(1.0)
+                else:
+                    # Use weight at the start of this token's char span
+                    token_weights.append(char_weights[s])
+            return token_weights
+        except Exception:
+            # Fallback: compute scalar discount from char fractions
+            total = len(response_str) or 1
+            weighted = sum(char_weights[:len(response_str)]) / total
+            return [weighted] * resp_token_len
 
 
 # Idempotent registration – the module may be exec'd more than once by verl's
