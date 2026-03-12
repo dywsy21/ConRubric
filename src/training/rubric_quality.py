@@ -54,15 +54,16 @@ class RubricQualityConfig:
 # Format 1 (sign-first): [+], [-], [+3], [-2], [−1] (en-dash allowed)
 # Format 2 (digit-first): [1+], [2-], [1−] (model sometimes generates this)
 # IMPORTANT: At least one sign (+/-/en-dash/em-dash) MUST be present.
+# The leading bullet (- or *) is optional to support base models that omit it.
 _CRITERION_RE = re.compile(
-    r"^\s*[-*\u2013\u2014]\s*\[(\d*[+\-\u2013\u2014]+\d*)\]\s*(.+?)(?:\s*\|\s*tags?\s*:.*)?$",
+    r"^\s*(?:[-*\u2013\u2014]\s*)?\[(\d*[+\-\u2013\u2014]+\d*)\]\s*(.+?)(?:\s*\|\s*tags?\s*:.*)?$",
     re.IGNORECASE,
 )
 
 # Regex to detect lines that LOOK like criteria but have malformed bracket content
-# Used to penalize format drift. Matches bullet + bracket but invalid content.
+# Used to penalize format drift. Matches optional bullet + bracket but invalid content.
 _MALFORMED_CRITERION_RE = re.compile(
-    r"^\s*[-*\u2013\u2014]\s*\[[^\]]*\]\s*.+$",
+    r"^\s*(?:[-*\u2013\u2014]\s*)?\[[^\]]*\]\s*.+$",
 )
 
 
