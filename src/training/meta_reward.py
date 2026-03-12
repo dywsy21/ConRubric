@@ -32,6 +32,9 @@ from src.training.rubric_quality import (
     score_rubric_quality,
 )
 
+# Strip legacy "| tags: ..." suffixes from generated rubric text
+_TAGS_SUFFIX_RE = re.compile(r'\s*\|\s*tags?\s*:.*$', re.IGNORECASE | re.MULTILINE)
+
 # Per-service parallel settings
 DEFAULT_SOLVER_WORKERS = int(os.environ.get("GRM_SOLVER_WORKERS", 4))
 DEFAULT_ORACLE_WORKERS = int(os.environ.get("GRM_ORACLE_WORKERS", 4))
@@ -105,6 +108,9 @@ def _find_unique_criteria(
                 continue
             vals_i = [sv_i[a] for a in common]
             vals_j = [sv_j[a] for a in common]
+            # Skip if either vector is constant (correlation undefined)
+            if len(set(vals_i)) < 2 or len(set(vals_j)) < 2:
+                continue
             try:
                 rho, _ = scipy_stats.spearmanr(vals_i, vals_j)
                 if not np.isnan(rho) and rho > threshold:
@@ -226,7 +232,9 @@ class MetaRewardFunction:
         # ── Group by question ──────────────────────────────────────────
         q_to_rubrics: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
         for idx, (q, r) in enumerate(zip(questions, rubrics)):
-            q_to_rubrics[q].append((idx, r))
+            # Strip legacy "| tags: ..." suffixes from generated rubric text
+            r_clean = _TAGS_SUFFIX_RE.sub('', r)
+            q_to_rubrics[q].append((idx, r_clean))
 
         q_items = list(q_to_rubrics.items())
         print(f"[MetaReward] Processing {len(q_items)} unique questions")
