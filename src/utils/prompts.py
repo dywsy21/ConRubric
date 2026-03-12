@@ -28,9 +28,12 @@ RUBRIC_GENERATION_PROMPT = (
     "Every line of your output must be a criterion in the specified format.\n"
     "5. Each criterion must be UNIQUE — do not repeat the same criterion "
     "with minor rewording. If you find yourself writing the same idea again, stop.\n\n"
-    "Output each criterion on its own line in this format:\n"
-    "- [+] criterion (for positive criteria: what the answer should do)\n"
-    "- [-] criterion (for negative criteria: mistakes or harmful behaviors)\n\n"
+    "FORMAT (STRICT — follow exactly):\n"
+    "- [+] criterion text (for positive criteria)\n"
+    "- [-] criterion text (for negative criteria)\n\n"
+    "The bracket MUST contain ONLY a plus or minus sign: [+] or [-].\n"
+    "DO NOT use digits inside brackets. WRONG: [1+], [+1], [-1], [1-].\n"
+    "The sign MUST come first. WRONG: [+-], [-+].\n\n"
     "Question:\n{question}"
 )
 

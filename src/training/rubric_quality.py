@@ -34,6 +34,11 @@ class RubricQualityConfig:
     token_soft_max: int = int(os.getenv("GRM_TOKEN_SOFT_MAX", "750"))
     token_hard_max: int = int(os.getenv("GRM_TOKEN_HARD_MAX", "1024"))
 
+    # Malformed criterion penalty: penalize lines that look like criteria but have
+    # invalid bracket syntax (e.g., [1+], [−1−] instead of [+], [-]).
+    # This punishes format drift strongly.
+    lambda_malformed: float = float(os.getenv("GRM_LAMBDA_MALFORMED", "2.0"))
+
     # Whether to enable quality scoring at all (master switch)
     enabled: bool = os.getenv("GRM_RUBRIC_QUALITY", "true").lower() in ("1", "true", "yes")
 
@@ -42,11 +47,22 @@ class RubricQualityConfig:
 
 # Matches lines like  "- [+] criterion text | tags: ..."
 #                  or  "- [-] criterion text"
-#                  or  "- [+3] criterion text" (legacy format, still parseable)
+#                  or  "- [+3] criterion text" (legacy format)
+#                  or  "- [1+] criterion text" (digit-first format, model drift)
+#                  or  "- [−1−] criterion text" (digit-first with en-dash)
 # Tags after | are stripped and ignored.
+# Format 1 (sign-first): [+], [-], [+3], [-2], [−1] (en-dash allowed)
+# Format 2 (digit-first): [1+], [2-], [1−] (model sometimes generates this)
+# IMPORTANT: At least one sign (+/-/en-dash/em-dash) MUST be present.
 _CRITERION_RE = re.compile(
-    r"^\s*[-*\u2013\u2014]\s*\[([+\-\u2013\u2014](?:\d+)?)\]\s*(.+?)(?:\s*\|\s*tags?\s*:.*)?$",
+    r"^\s*[-*\u2013\u2014]\s*\[(\d*[+\-\u2013\u2014]+\d*)\]\s*(.+?)(?:\s*\|\s*tags?\s*:.*)?$",
     re.IGNORECASE,
+)
+
+# Regex to detect lines that LOOK like criteria but have malformed bracket content
+# Used to penalize format drift. Matches bullet + bracket but invalid content.
+_MALFORMED_CRITERION_RE = re.compile(
+    r"^\s*[-*\u2013\u2014]\s*\[[^\]]*\]\s*.+$",
 )
 
 
@@ -56,22 +72,62 @@ class ParsedCriterion:
     text: str
 
 
+def _extract_sign(bracket_content: str) -> str:
+    """Extract sign from bracket content, handling both sign-first and digit-first formats.
+    
+    Examples:
+        "+" -> "+", "-" -> "-"
+        "+3" -> "+", "-2" -> "-"
+        "1+" -> "+", "2-" -> "-"
+        "−1" -> "-" (en-dash)
+        "1−" -> "-" (digit-first with en-dash)
+    """
+    # Normalize en-dash/em-dash to regular minus
+    normalized = bracket_content.replace("\u2013", "-").replace("\u2014", "-")
+    
+    # Check for explicit sign anywhere
+    if "+" in normalized:
+        return "+"
+    elif "-" in normalized:
+        return "-"
+    else:
+        # No sign found - default to positive (shouldn't happen with valid format)
+        return "+"
+
+
 def parse_rubric_text(rubric_text: str) -> List[ParsedCriterion]:
     """Parse a rubric string into structured criteria.
 
-    Tolerates minor formatting variations (bullet style, spacing).
+    Tolerates minor formatting variations (bullet style, spacing, sign position).
     Returns an empty list if nothing can be parsed.
     """
     criteria: List[ParsedCriterion] = []
     for line in rubric_text.splitlines():
         m = _CRITERION_RE.match(line)
         if m:
-            sign_str = m.group(1)
-            sign = "+" if sign_str.startswith("+") else "-"
+            bracket_content = m.group(1)
+            sign = _extract_sign(bracket_content)
             text = m.group(2).strip()
-            # Normalize en-dash/em-dash bullets to regular hyphen in output
             criteria.append(ParsedCriterion(sign=sign, text=text))
     return criteria
+
+
+def count_malformed_criteria(rubric_text: str) -> int:
+    """Count lines that look like criteria but have malformed bracket content.
+    
+    This detects format drift where the model generates invalid bracket syntax
+    like [1+], [−1−], etc. These lines LOOK like criteria but won't parse.
+    
+    Returns count of lines that match bullet+bracket pattern but fail strict parsing.
+    """
+    malformed = 0
+    for line in rubric_text.splitlines():
+        # Check if line looks like a criterion (bullet + brackets)
+        if _MALFORMED_CRITERION_RE.match(line):
+            # But doesn't match the strict criterion pattern
+            if not _CRITERION_RE.match(line):
+                malformed += 1
+    return malformed
 
 
 # ── Quality Scoring ────────────────────────────────────────────────────────
@@ -132,10 +188,21 @@ def score_rubric_quality(
         token_len_penalty = 0.0
     detail["token_length_penalty"] = token_len_penalty
 
+    # ── 3. Malformed criterion penalty ──────────────────────────────────
+    # Strongly penalize lines that look like criteria but have invalid format.
+    # This catches format drift like [1+], [−1−] which the model may generate.
+    n_malformed = count_malformed_criteria(rubric_text)
+    if n_malformed > 0:
+        # Penalty proportional to number of malformed lines, capped at -lambda_malformed
+        malformed_penalty = -config.lambda_malformed * min(n_malformed / 3.0, 1.0)
+    else:
+        malformed_penalty = 0.0
+    detail["malformed_penalty"] = malformed_penalty
+
     n_pos = sum(1 for c in criteria if c.sign == "+")
     n_neg = sum(1 for c in criteria if c.sign == "-")
 
-    total = len_penalty + token_len_penalty
+    total = len_penalty + token_len_penalty + malformed_penalty
 
     return RubricQualityResult(
         n_criteria=n,
