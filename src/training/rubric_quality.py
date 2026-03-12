@@ -45,7 +45,7 @@ class RubricQualityConfig:
 #                  or  "- [+3] criterion text" (legacy format, still parseable)
 # Tags after | are stripped and ignored.
 _CRITERION_RE = re.compile(
-    r"^\s*[-*]\s*\[([+-](?:\d+)?)\]\s*(.+?)(?:\s*\|\s*tags?\s*:.*)?$",
+    r"^\s*[-*\u2013\u2014]\s*\[([+\-\u2013\u2014](?:\d+)?)\]\s*(.+?)(?:\s*\|\s*tags?\s*:.*)?$",
     re.IGNORECASE,
 )
 
@@ -69,6 +69,7 @@ def parse_rubric_text(rubric_text: str) -> List[ParsedCriterion]:
             sign_str = m.group(1)
             sign = "+" if sign_str.startswith("+") else "-"
             text = m.group(2).strip()
+            # Normalize en-dash/em-dash bullets to regular hyphen in output
             criteria.append(ParsedCriterion(sign=sign, text=text))
     return criteria
 
