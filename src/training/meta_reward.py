@@ -599,6 +599,17 @@ class MetaRewardFunction:
 
         print(f"{'='*80}\n")
 
+    @staticmethod
+    def _json_default(obj):
+        """Handle numpy types for JSON serialization."""
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
     def _save_rollout_log(
         self,
         step: int,
@@ -637,7 +648,7 @@ class MetaRewardFunction:
                         "n_rollouts": len(items),
                         "rollouts": rollouts,
                     }
-                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    f.write(json.dumps(record, ensure_ascii=False, default=self._json_default) + "\n")
             print(f"[MetaReward] Rollout log saved: {log_file}")
         except Exception as e:
             print(f"[MetaReward] Failed to save rollout log: {e}")
