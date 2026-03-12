@@ -400,7 +400,7 @@ class MetaRewardFunction:
 
             if n < 2:
                 # Single rollout: quality adjustment only (no cross-evaluation)
-                qa = quality_adjustments[indices[0]] if RUBRIC_QUALITY_CONFIG.enabled else 0.0
+                qa = float(quality_adjustments[indices[0]]) if RUBRIC_QUALITY_CONFIG.enabled else 0.0
                 rewards[indices[0]] = qa
                 all_rollout_details[q_idx] = {}
             else:
@@ -483,7 +483,7 @@ class MetaRewardFunction:
                         })
 
                     # ── Final reward for rollout j ────────────────────────
-                    qa = quality_adjustments[indices[j]] if RUBRIC_QUALITY_CONFIG.enabled else 0.0
+                    qa = float(quality_adjustments[indices[j]]) if RUBRIC_QUALITY_CONFIG.enabled else 0.0
                     rewards[indices[j]] = consensus + disc_reward + qa
 
                     rollout_details[j] = {
@@ -601,13 +601,16 @@ class MetaRewardFunction:
 
     @staticmethod
     def _json_default(obj):
-        """Handle numpy types for JSON serialization."""
+        """Handle numpy/torch types for JSON serialization."""
         if isinstance(obj, (np.integer,)):
             return int(obj)
         if isinstance(obj, (np.floating,)):
             return float(obj)
         if isinstance(obj, np.ndarray):
             return obj.tolist()
+        # Catch-all for any numeric type with .item() (torch scalars, etc.)
+        if hasattr(obj, "item"):
+            return obj.item()
         raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
     def _save_rollout_log(
