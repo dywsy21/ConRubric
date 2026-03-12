@@ -260,9 +260,11 @@ class MetaRewardFunction:
             _mean_adj = float(np.mean(quality_adjustments))
             _mean_tpen = np.mean([d.get("token_length_penalty", 0.0) for d in _quality_details])
             _mean_lpen = np.mean([d.get("length_penalty", 0.0) for d in _quality_details])
+            _mean_mpen = np.mean([d.get("malformed_penalty", 0.0) for d in _quality_details])
             print(f"[MetaReward] quality_adj_mean={_mean_adj:.3f}, "
                   f"length_penalty_mean={_mean_lpen:.3f}, "
-                  f"token_len_penalty_mean={_mean_tpen:.3f}")
+                  f"token_len_penalty_mean={_mean_tpen:.3f}, "
+                  f"malformed_penalty_mean={_mean_mpen:.3f}")
 
         # Per-question answer storage for rollout logging
         question_answers: Dict[int, Dict[int, str]] = {}
