@@ -28,6 +28,7 @@ from src.evaluation.judge import Oracle
 from src.models.solver import Solver
 from src.training.rubric_quality import (
     RubricQualityConfig,
+    parse_rubric_text,
     score_rubric_quality,
 )
 
@@ -51,9 +52,68 @@ ROLLOUT_LOG_DIR = os.environ.get("GRM_ROLLOUT_LOG_DIR", "out/rl/rollout_logs")
 DISC_SCALE = float(os.environ.get("GRM_DISC_SCALE", "1.0"))
 
 # ── Spearman redundancy parameters ────────────────────────────────────────
-# Threshold for Spearman correlation above which two rubrics are considered
-# redundant.  Each redundant rubric's reward is divided by dup_count.
+# Threshold for Spearman correlation above which two criteria within the same
+# rollout are considered redundant.  Redundant criteria are counted only once
+# when computing the consensus score.
 SPEARMAN_THRESHOLD = float(os.environ.get("GRM_SPEARMAN_THRESHOLD", "0.8"))
+
+
+def _find_unique_criteria(
+    crit_scores: Dict[int, Dict[int, float]],
+    threshold: float,
+) -> List[int]:
+    """Find non-redundant criteria via Spearman correlation (union-find).
+
+    Within a single rollout, criteria whose score vectors are highly
+    correlated (rho > threshold) are merged into one cluster.  Returns one
+    representative criterion index per cluster.
+
+    Args:
+        crit_scores: {criterion_idx: {answer_idx: score}}
+        threshold: Spearman rho above which two criteria are redundant
+
+    Returns:
+        Sorted list of representative criterion indices.
+    """
+    all_k = sorted(crit_scores.keys())
+    if len(all_k) <= 1:
+        return all_k
+
+    # Union-Find
+    parent = {k: k for k in all_k}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x, y):
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[ry] = rx
+
+    for i_idx, ki in enumerate(all_k):
+        for kj in all_k[i_idx + 1:]:
+            sv_i = crit_scores.get(ki, {})
+            sv_j = crit_scores.get(kj, {})
+            common = sorted(set(sv_i.keys()) & set(sv_j.keys()))
+            if len(common) < 3:
+                continue
+            vals_i = [sv_i[a] for a in common]
+            vals_j = [sv_j[a] for a in common]
+            try:
+                rho, _ = scipy_stats.spearmanr(vals_i, vals_j)
+                if not np.isnan(rho) and rho > threshold:
+                    union(ki, kj)
+            except Exception:
+                continue
+
+    # One representative per component (smallest index)
+    components = defaultdict(list)
+    for k in all_k:
+        components[find(k)].append(k)
+    return sorted(min(comp) for comp in components.values())
 
 
 class MetaRewardFunction:
@@ -124,17 +184,21 @@ class MetaRewardFunction:
                        global_step: int = None,
                        response_token_counts: Optional[List[int]] = None) -> torch.Tensor:
         """
-        Computes per-rubric reward using variance-based discrimination
-        and Spearman redundancy penalty.
+        Computes per-rollout reward using per-criterion evaluation.
 
-        Pipeline per question (N rollouts → N rubrics):
-            1. Generate N answers via Solver (one per rubric)
-            2. Each rubric j evaluates all N-1 other answers → N-1 scores
-            3. Discrimination reward = DISC_SCALE * sqrt(var(scores_j))
-            4. Spearman redundancy: for each pair (j, k), if Spearman > threshold,
-               both are redundant.  dup_count = number of correlated rubrics.
-            5. Final reward = disc_reward / dup_count + quality_adjustment
-            6. Reward applied uniformly to all response tokens (per-token)
+        Pipeline per question (N rollouts → N rubric sets):
+            1. Generate N answers via Solver (one per rollout/rubric-set)
+            2. Parse each rollout's rubric text into M individual criteria
+            3. Each criterion c_k of rollout j evaluates all N-1 other answers
+               → score vector of length N-1
+            4. Spearman dedup within rollout: criteria with rho > threshold
+               are clustered; only one representative per cluster counts
+            5. Consensus: for each other answer, mean of unique criteria scores
+               → consensus_j = mean across other answers
+            6. Discrimination: for each unique criterion,
+               disc_k = sqrt(var(scores_k)) → disc_j = mean(disc_k) * DISC_SCALE
+            7. Final reward = consensus + disc + quality_adjustment
+            8. Reward applied uniformly to all response tokens (per-token)
         """
         if solver_workers is None:
             solver_workers = DEFAULT_SOLVER_WORKERS
@@ -241,12 +305,14 @@ class MetaRewardFunction:
             solver_futures[q_idx] = futs
 
         # ── Phase 2: Coordinate evaluation per question ────────────────
-        eval_futures: Dict[int, List] = {}  # q_idx -> [(j, answer_indices, future)]
+        # eval_futures: q_idx -> [(j, k, answer_indices, future)]
+        #   j = rollout index, k = criterion index within rollout
+        eval_futures: Dict[int, List] = {}
         coordinator_futures: List[Future] = []
         coordinator_pool = ThreadPoolExecutor(max_workers=len(q_items))
 
         def _coordinate_question(q_idx: int, q: str, items: List[Tuple[int, str]], n: int):
-            """Wait for solver results, then submit oracle evals."""
+            """Wait for solver results, then submit per-criterion oracle evals."""
             # Collect answers
             answers = {}  # local_i -> answer text
             for local_i, fut in solver_futures[q_idx]:
@@ -260,16 +326,8 @@ class MetaRewardFunction:
             question_answers[q_idx] = dict(answers)
 
             if n < 2:
-                # Single rubric — no cross-evaluation possible
-                if answers:
-                    with progress_lock:
-                        progress["eval_total"] += 1
-                    fut = oracle_pool.submit(
-                        _eval_batch_by_rubric, q, [answers.get(0, "")], items[0][1]
-                    )
-                    eval_futures[q_idx] = [(0, [0], fut)]
-                else:
-                    eval_futures[q_idx] = []
+                # Single rollout — no cross-evaluation possible
+                eval_futures[q_idx] = []
                 return
 
             answer_keys = sorted(answers.keys())
@@ -277,20 +335,31 @@ class MetaRewardFunction:
                 eval_futures[q_idx] = []
                 return
 
-            # Each rubric j evaluates all other available answers
+            # Parse each rollout's rubric into individual criteria,
+            # then submit one oracle call per criterion
             total_evals = 0
             batch_futs = []
             for j in range(n):
-                available = [ai for ai in answer_keys if ai != j]
-                if not available:
-                    available = answer_keys[:]
-                selected_answers = [answers[ai] for ai in available]
-                total_evals += len(selected_answers)
-                rubric_j = items[j][1]
-                fut = oracle_pool.submit(
-                    _eval_batch_by_rubric, q, selected_answers, rubric_j
-                )
-                batch_futs.append((j, available, fut))
+                _, rubric_text = items[j]
+                criteria = parse_rubric_text(rubric_text)
+                if criteria:
+                    criterion_texts = [f"- [{c.sign}] {c.text}" for c in criteria]
+                else:
+                    # Fallback: use the whole rubric text as one criterion
+                    criterion_texts = [rubric_text]
+
+                # Other answers (exclude answer j)
+                other_keys = [ai for ai in answer_keys if ai != j]
+                if not other_keys:
+                    other_keys = answer_keys[:]
+                other_answers = [answers[ai] for ai in other_keys]
+
+                for k, crit_text in enumerate(criterion_texts):
+                    total_evals += len(other_answers)
+                    fut = oracle_pool.submit(
+                        _eval_batch_by_rubric, q, other_answers, crit_text
+                    )
+                    batch_futs.append((j, k, other_keys, fut))
 
             with progress_lock:
                 progress["eval_total"] += total_evals
@@ -301,7 +370,7 @@ class MetaRewardFunction:
             cfut = coordinator_pool.submit(_coordinate_question, q_idx, q, items, n)
             coordinator_futures.append(cfut)
 
-        # ── Phase 3: Collect results, compute discrimination + redundancy ──
+        # ── Phase 3: Collect per-criterion results, compute rewards ────
         for cfut in coordinator_futures:
             cfut.result()
 
@@ -310,83 +379,72 @@ class MetaRewardFunction:
             n = len(items)
 
             if n < 2:
-                # Single rubric: use raw oracle score + quality adjustment
-                if eval_futures.get(q_idx):
-                    j, answer_indices, fut = eval_futures[q_idx][0]
-                    try:
-                        scores = fut.result(timeout=900)
-                        raw_reward = scores[0] if scores else 0.0
-                    except Exception as e:
-                        print(f"[MetaReward] Eval error Q{q_idx}: {e}")
-                        raw_reward = 0.0
-                    qa = quality_adjustments[indices[0]] if RUBRIC_QUALITY_CONFIG.enabled else 0.0
-                    rewards[indices[0]] = raw_reward + qa
+                # Single rollout: quality adjustment only (no cross-evaluation)
+                qa = quality_adjustments[indices[0]] if RUBRIC_QUALITY_CONFIG.enabled else 0.0
+                rewards[indices[0]] = qa
             else:
-                # Build score vectors: score_vectors[j][k] = score rubric j
-                # gave to answer k (answers from other rubrics)
-                score_vectors: Dict[int, Dict[int, float]] = {}
+                # Build per-criterion score matrix:
+                # crit_scores[j][k] = {answer_idx: score}
+                crit_scores: Dict[int, Dict[int, Dict[int, float]]] = defaultdict(dict)
 
-                for j, answer_indices, fut in eval_futures[q_idx]:
+                for j, k, other_keys, fut in eval_futures[q_idx]:
                     try:
                         scores = fut.result(timeout=900)
                         score_map = {}
-                        for pos, ai in enumerate(answer_indices):
+                        for pos, ai in enumerate(other_keys):
                             if pos < len(scores):
                                 score_map[ai] = scores[pos]
-                        score_vectors[j] = score_map
+                        crit_scores[j][k] = score_map
                     except Exception as e:
-                        print(f"[MetaReward] Eval error Q{q_idx} rubric {j}: {e}")
-                        score_vectors[j] = {}
+                        print(f"[MetaReward] Eval error Q{q_idx} R{j} C{k}: {e}")
+                        crit_scores[j][k] = {}
 
-                # ── Discrimination reward: variance of each rubric's scores ──
-                disc_rewards = np.zeros(n, dtype=np.float64)
+                # Per-rollout: Spearman dedup → consensus + discrimination
                 for j in range(n):
-                    sv = score_vectors.get(j, {})
-                    score_list = list(sv.values())
-                    if len(score_list) >= 2:
-                        var = np.var(score_list)
-                        disc_rewards[j] = DISC_SCALE * np.sqrt(var)
-                    else:
-                        disc_rewards[j] = 0.0
+                    j_crit = crit_scores.get(j, {})
+                    n_total_crit = len(j_crit)
 
-                # ── Spearman redundancy penalty ──────────────────────────
-                # For each pair (j, k), compute Spearman on common answers.
-                # If rho > threshold, increment dup_count for both.
-                dup_counts = np.ones(n, dtype=np.int32)  # start at 1 (self)
+                    # Find unique (non-redundant) criteria within this rollout
+                    unique_reps = _find_unique_criteria(j_crit, SPEARMAN_THRESHOLD)
+                    n_unique = len(unique_reps)
 
-                if n >= 3:  # need ≥3 rubrics for meaningful redundancy
-                    for j in range(n):
-                        for k in range(j + 1, n):
-                            sv_j = score_vectors.get(j, {})
-                            sv_k = score_vectors.get(k, {})
-                            common = sorted(set(sv_j.keys()) & set(sv_k.keys()))
-                            if len(common) < 3:
-                                continue
-                            vals_j = [sv_j[ai] for ai in common]
-                            vals_k = [sv_k[ai] for ai in common]
-                            try:
-                                rho, _ = scipy_stats.spearmanr(vals_j, vals_k)
-                                if np.isnan(rho):
-                                    continue
-                                if rho > SPEARMAN_THRESHOLD:
-                                    dup_counts[j] += 1
-                                    dup_counts[k] += 1
-                            except Exception:
-                                continue
+                    # ── Consensus: when rollout j evaluates answer i, the
+                    # score = mean of unique criteria scores for answer i.
+                    # Consensus reward = mean across all other answers.
+                    answer_keys_for_j = set()
+                    for k_data in j_crit.values():
+                        answer_keys_for_j.update(k_data.keys())
+                    other_answer_keys = sorted(answer_keys_for_j)
 
-                # ── Final reward per rubric ───────────────────────────────
-                for i in range(n):
-                    disc_r = disc_rewards[i] / dup_counts[i]
-                    qa = quality_adjustments[indices[i]] if RUBRIC_QUALITY_CONFIG.enabled else 0.0
-                    rewards[indices[i]] = disc_r + qa
+                    consensus_per_answer = []
+                    for ai in other_answer_keys:
+                        crit_vals = []
+                        for uk in unique_reps:
+                            s = j_crit.get(uk, {}).get(ai)
+                            if s is not None:
+                                crit_vals.append(s)
+                        if crit_vals:
+                            consensus_per_answer.append(np.mean(crit_vals))
+                    consensus = float(np.mean(consensus_per_answer)) if consensus_per_answer else 0.0
 
-                # Log details
-                _disc_mean = np.mean(disc_rewards)
-                _dup_mean = np.mean(dup_counts.astype(float))
-                _reward_vals = [rewards[idx].item() for idx in indices]
-                print(f"[MetaReward]   Q{q_idx}: disc_mean={_disc_mean:.3f}, "
-                      f"dup_count_mean={_dup_mean:.1f}, "
-                      f"rewards={[f'{r:.2f}' for r in _reward_vals]}")
+                    # ── Discrimination: for each unique criterion,
+                    # disc_k = sqrt(var(scores_k across answers)).
+                    # Rollout disc = mean(disc_k) * DISC_SCALE.
+                    disc_values = []
+                    for uk in unique_reps:
+                        score_list = list(j_crit.get(uk, {}).values())
+                        if len(score_list) >= 2:
+                            disc_values.append(np.sqrt(np.var(score_list)))
+                    disc_reward = float(DISC_SCALE * np.mean(disc_values)) if disc_values else 0.0
+
+                    # ── Final reward for rollout j ────────────────────────
+                    qa = quality_adjustments[indices[j]] if RUBRIC_QUALITY_CONFIG.enabled else 0.0
+                    rewards[indices[j]] = consensus + disc_reward + qa
+
+                    print(f"[MetaReward]   Q{q_idx} R{j}: {n_total_crit} criteria → "
+                          f"{n_unique} unique, consensus={consensus:.2f}, "
+                          f"disc={disc_reward:.2f}, qa={qa:.2f}, "
+                          f"reward={rewards[indices[j]].item():.2f}")
 
             with progress_lock:
                 progress["q_done"] += 1

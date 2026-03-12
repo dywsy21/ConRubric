@@ -13,3 +13,4 @@ docs
 .pytest_cache
 _*
 docs/benchmark_comparison_analysis.md
+*.bak2
