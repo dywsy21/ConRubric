@@ -18,8 +18,8 @@ class WeightedRubricSFTDataset(Dataset):
     verl-compatible custom SFT dataset with criterion-level token weights.
 
     Input files are JSONL rows in one of these schemas:
-    1) {"question": str, "rubric": [str | {criterion, points, tags}]}
-    2) {"prompt": list[{role, content}] | str, "rubrics": [{criterion, points, tags}]}
+    1) {"question": str, "rubric": [str | {criterion, points}]}
+    2) {"prompt": list[{role, content}] | str, "rubrics": [{criterion, points}]}
 
     Returned sample adds `token_loss_weight` (same length as `input_ids`).
     """
@@ -93,14 +93,11 @@ class WeightedRubricSFTDataset(Dataset):
                 if not c:
                     continue
                 p = int(r.get("points", 1))
-                t = r.get("tags", [])
-                if not isinstance(t, list):
-                    t = []
-                out.append({"criterion": c, "points": p, "tags": t})
+                out.append({"criterion": c, "points": p})
             else:
                 c = str(r).strip()
                 if c:
-                    out.append({"criterion": c, "points": 1, "tags": []})
+                    out.append({"criterion": c, "points": 1})
         return out
 
     def _point_to_weight(self, points: int) -> float:
@@ -142,9 +139,7 @@ class WeightedRubricSFTDataset(Dataset):
         for r in rubrics:
             pts = int(r["points"])
             criterion = r["criterion"]
-            tags = r.get("tags", [])
-            tags_suffix = f" | tags: {', '.join(tags)}" if tags else ""
-            line = f"- [{pts:+d}] {criterion}{tags_suffix}\n"
+            line = f"- [{pts:+d}] {criterion}\n"
             line_ids = self.tokenizer(line, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
             w = self._point_to_weight(pts)
             response_parts.append(line_ids)

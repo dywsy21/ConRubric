@@ -50,14 +50,11 @@ def _normalize_rubrics(raw_rubrics: Any) -> List[Dict[str, Any]]:
             if not criterion:
                 continue
             points = int(r.get("points", 1))
-            tags = r.get("tags", [])
-            if not isinstance(tags, list):
-                tags = []
-            out.append({"criterion": criterion, "points": points, "tags": tags})
+            out.append({"criterion": criterion, "points": points})
         else:
             criterion = str(r).strip()
             if criterion:
-                out.append({"criterion": criterion, "points": 1, "tags": []})
+                out.append({"criterion": criterion, "points": 1})
     return out
 
 
@@ -155,9 +152,7 @@ def _build_weighted_sft_jsonl(args, config: ProjectConfig) -> str:
             for j, item in enumerate(rubrics[:6], start=1):
                 pts = int(item.get("points", 1))
                 criterion = item.get("criterion", "")
-                tags = item.get("tags", [])
-                tag_str = f" | tags: {', '.join(tags)}" if tags else ""
-                print(f"  {j}. [{pts:+d}] {criterion}{tag_str}")
+                print(f"  {j}. [{pts:+d}] {criterion}")
             if len(rubrics) > 6:
                 print(f"  ... ({len(rubrics) - 6} more criteria)")
         print("=" * 80 + "\n")

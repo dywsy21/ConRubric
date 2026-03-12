@@ -48,14 +48,11 @@ def _normalize_rubrics(raw_rubrics: Any) -> list[dict[str, Any]]:
             if not criterion:
                 continue
             points = int(r.get("points", 1))
-            tags = r.get("tags", [])
-            if not isinstance(tags, list):
-                tags = []
-            out.append({"criterion": criterion, "points": points, "tags": tags})
+            out.append({"criterion": criterion, "points": points})
         else:
             criterion = str(r).strip()
             if criterion:
-                out.append({"criterion": criterion, "points": 1, "tags": []})
+                out.append({"criterion": criterion, "points": 1})
     return out
 
 

@@ -127,7 +127,6 @@ class TestRubricParsing:
         assert len(criteria) == 6
         assert criteria[0].sign == "+"
         assert criteria[3].sign == "-"
-        assert "safety" in criteria[3].tags
 
     def test_parse_empty(self):
         assert parse_rubric_text("") == []
@@ -136,7 +135,6 @@ class TestRubricParsing:
     def test_parse_without_tags(self):
         criteria = parse_rubric_text("- [+3] Simple criterion\n")
         assert len(criteria) == 1
-        assert criteria[0].tags == []
         assert criteria[0].sign == "+"
 
     def test_parse_new_format(self):

@@ -8,7 +8,7 @@ RubricHub schema (Parquet):
 
 GRM SFT schema:
     question:  str   (plain text extracted from prompt)
-    rubrics:   list[{criterion: str, points: int, tags: list}]   (points in [-10,10])
+    rubrics:   list[{criterion: str, points: int}]   (points in [-10,10])
     source:    str
 """
 
@@ -58,7 +58,7 @@ def _convert_rubrics(rubrics: Any) -> List[Dict[str, Any]]:
             points = max(1, min(10, int(raw_points)))
         except (ValueError, TypeError):
             points = 1
-        out.append({"criterion": criterion, "points": points, "tags": []})
+        out.append({"criterion": criterion, "points": points})
     return out
 
 
@@ -87,7 +87,7 @@ def _convert_ruft_rubrics(rubrics: Any) -> List[Dict[str, Any]]:
                 points = max(1, min(10, int(weight)))
         except (ValueError, TypeError):
             points = 1
-        out.append({"criterion": criterion, "points": points, "tags": []})
+        out.append({"criterion": criterion, "points": points})
     return out
 
 

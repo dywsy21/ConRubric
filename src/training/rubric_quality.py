@@ -43,8 +43,9 @@ class RubricQualityConfig:
 # Matches lines like  "- [+] criterion text | tags: ..."
 #                  or  "- [-] criterion text"
 #                  or  "- [+3] criterion text" (legacy format, still parseable)
+# Tags after | are stripped and ignored.
 _CRITERION_RE = re.compile(
-    r"^\s*[-*]\s*\[([+-](?:\d+)?)\]\s*(.+?)(?:\s*\|\s*tags?\s*:\s*(.*))?$",
+    r"^\s*[-*]\s*\[([+-](?:\d+)?)\]\s*(.+?)(?:\s*\|\s*tags?\s*:.*)?$",
     re.IGNORECASE,
 )
 
@@ -53,7 +54,6 @@ _CRITERION_RE = re.compile(
 class ParsedCriterion:
     sign: str  # "+" or "-"
     text: str
-    tags: List[str]
 
 
 def parse_rubric_text(rubric_text: str) -> List[ParsedCriterion]:
@@ -69,9 +69,7 @@ def parse_rubric_text(rubric_text: str) -> List[ParsedCriterion]:
             sign_str = m.group(1)
             sign = "+" if sign_str.startswith("+") else "-"
             text = m.group(2).strip()
-            tags_str = m.group(3)
-            tags = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else []
-            criteria.append(ParsedCriterion(sign=sign, text=text, tags=tags))
+            criteria.append(ParsedCriterion(sign=sign, text=text))
     return criteria
 
 

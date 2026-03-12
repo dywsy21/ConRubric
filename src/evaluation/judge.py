@@ -155,7 +155,7 @@ class Judge:
     def reverse_engineer_rubric(self, question: str, gold_answer: str, max_retries: int = 3) -> List[Dict[str, Any]]:
         """
         Reverse-engineer rubric with signed criterion points.
-        Returns list of {criterion, points, tags} where points in [-10, 10], points != 0,
+        Returns list of {criterion, points} where points in [-10, 10], points != 0,
         and at least one positive + one negative item whenever possible.
         """
         base_prompt = REVERSE_ENGINEER_RUBRIC_PROMPT.format(question=question, gold_answer=gold_answer)
@@ -210,15 +210,12 @@ class Judge:
                         points = max(-10, min(10, points))
                         if points == 0:
                             continue
-                        tags = item.get("tags", [])
-                        if not isinstance(tags, list):
-                            tags = []
-                        out.append({"criterion": criterion, "points": points, "tags": tags})
+                        out.append({"criterion": criterion, "points": points})
                     elif isinstance(item, str):
                         # Fallback for old string-only format: assign +1
                         criterion = item.strip()
                         if criterion:
-                            out.append({"criterion": criterion, "points": 1, "tags": []})
+                            out.append({"criterion": criterion, "points": 1})
 
             if out:
                 return out
@@ -239,7 +236,7 @@ class Judge:
                 criterion = re.sub(r"^[-*\d\.\s]*", "", line_strip)
                 criterion = re.sub(r"\[\s*[+-]?\d+\s*\]", "", criterion).strip(" -:")
                 if criterion:
-                    out.append({"criterion": criterion, "points": points, "tags": []})
+                    out.append({"criterion": criterion, "points": points})
 
             return out
         except Exception as e:

@@ -30,8 +30,7 @@ RUBRIC_GENERATION_PROMPT = (
     "with minor rewording. If you find yourself writing the same idea again, stop.\n\n"
     "Output each criterion on its own line in this format:\n"
     "- [+] criterion (for positive criteria: what the answer should do)\n"
-    "- [-] criterion (for negative criteria: mistakes or harmful behaviors)\n"
-    "Optionally add tags: - [+] criterion | tags: tag1, tag2\n\n"
+    "- [-] criterion (for negative criteria: mistakes or harmful behaviors)\n\n"
     "Question:\n{question}"
 )
 
@@ -67,19 +66,15 @@ Scoring requirements:
    - positive criteria (points > 0): what should be done
    - negative criteria (points < 0): common mistakes / harmful / missing behaviors to penalize
 3. Prefer 6-12 total criteria.
-4. `tags` is optional but recommended.
-
 Output Format:
 [
     {{
         "criterion": "...",
-        "points": 8,
-        "tags": ["accuracy", "completeness"]
+        "points": 8
     }},
     {{
         "criterion": "...",
-        "points": -6,
-        "tags": ["hallucination", "safety"]
+        "points": -6
     }}
 ]
 
