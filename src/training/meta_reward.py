@@ -61,7 +61,7 @@ SPEARMAN_THRESHOLD = float(os.environ.get("GRM_SPEARMAN_THRESHOLD", "0.8"))
 def _find_unique_criteria(
     crit_scores: Dict[int, Dict[int, float]],
     threshold: float,
-) -> List[int]:
+) -> Tuple[List[int], Dict[int, List[int]]]:
     """Find non-redundant criteria via Spearman correlation (union-find).
 
     Within a single rollout, criteria whose score vectors are highly
@@ -73,11 +73,14 @@ def _find_unique_criteria(
         threshold: Spearman rho above which two criteria are redundant
 
     Returns:
-        Sorted list of representative criterion indices.
+        Tuple of:
+          - Sorted list of representative criterion indices.
+          - Dict mapping each representative to its full cluster members.
     """
     all_k = sorted(crit_scores.keys())
     if len(all_k) <= 1:
-        return all_k
+        clusters = {k: [k] for k in all_k}
+        return all_k, clusters
 
     # Union-Find
     parent = {k: k for k in all_k}
@@ -113,7 +116,9 @@ def _find_unique_criteria(
     components = defaultdict(list)
     for k in all_k:
         components[find(k)].append(k)
-    return sorted(min(comp) for comp in components.values())
+    reps = sorted(min(comp) for comp in components.values())
+    clusters = {min(comp): sorted(comp) for comp in components.values()}
+    return reps, clusters
 
 
 class MetaRewardFunction:
@@ -308,6 +313,8 @@ class MetaRewardFunction:
         # eval_futures: q_idx -> [(j, k, answer_indices, future)]
         #   j = rollout index, k = criterion index within rollout
         eval_futures: Dict[int, List] = {}
+        # Store parsed criterion texts per rollout for logging
+        rollout_criterion_texts: Dict[int, Dict[int, List[str]]] = {}  # q_idx -> {j -> [texts]}
         coordinator_futures: List[Future] = []
         coordinator_pool = ThreadPoolExecutor(max_workers=len(q_items))
 
@@ -339,6 +346,8 @@ class MetaRewardFunction:
             # then submit one oracle call per criterion
             total_evals = 0
             batch_futs = []
+            if q_idx not in rollout_criterion_texts:
+                rollout_criterion_texts[q_idx] = {}
             for j in range(n):
                 _, rubric_text = items[j]
                 criteria = parse_rubric_text(rubric_text)
@@ -347,6 +356,7 @@ class MetaRewardFunction:
                 else:
                     # Fallback: use the whole rubric text as one criterion
                     criterion_texts = [rubric_text]
+                rollout_criterion_texts[q_idx][j] = criterion_texts
 
                 # Other answers (exclude answer j)
                 other_keys = [ai for ai in answer_keys if ai != j]
@@ -374,6 +384,8 @@ class MetaRewardFunction:
         for cfut in coordinator_futures:
             cfut.result()
 
+        all_rollout_details: Dict[int, Dict[int, Dict]] = {}  # q_idx -> {j -> detail}
+
         for q_idx, (q, items) in enumerate(q_items):
             indices = [it[0] for it in items]  # global indices
             n = len(items)
@@ -382,6 +394,7 @@ class MetaRewardFunction:
                 # Single rollout: quality adjustment only (no cross-evaluation)
                 qa = quality_adjustments[indices[0]] if RUBRIC_QUALITY_CONFIG.enabled else 0.0
                 rewards[indices[0]] = qa
+                all_rollout_details[q_idx] = {}
             else:
                 # Build per-criterion score matrix:
                 # crit_scores[j][k] = {answer_idx: score}
@@ -400,12 +413,15 @@ class MetaRewardFunction:
                         crit_scores[j][k] = {}
 
                 # Per-rollout: Spearman dedup → consensus + discrimination
+                # Store per-criterion detail for logging
+                rollout_details: Dict[int, Dict] = {}
+
                 for j in range(n):
                     j_crit = crit_scores.get(j, {})
                     n_total_crit = len(j_crit)
 
                     # Find unique (non-redundant) criteria within this rollout
-                    unique_reps = _find_unique_criteria(j_crit, SPEARMAN_THRESHOLD)
+                    unique_reps, clusters = _find_unique_criteria(j_crit, SPEARMAN_THRESHOLD)
                     n_unique = len(unique_reps)
 
                     # ── Consensus: when rollout j evaluates answer i, the
@@ -437,14 +453,48 @@ class MetaRewardFunction:
                             disc_values.append(np.sqrt(np.var(score_list)))
                     disc_reward = float(DISC_SCALE * np.mean(disc_values)) if disc_values else 0.0
 
+                    # ── Per-criterion detail (for logging) ────────────────
+                    crit_detail = []
+                    crit_texts = rollout_criterion_texts.get(q_idx, {}).get(j, [])
+                    for k_idx in range(n_total_crit):
+                        scores_for_k = j_crit.get(k_idx, {})
+                        mean_score = float(np.mean(list(scores_for_k.values()))) if scores_for_k else 0.0
+                        is_dup = k_idx not in unique_reps
+                        dup_of = None
+                        if is_dup:
+                            for rep, members in clusters.items():
+                                if k_idx in members and rep != k_idx:
+                                    dup_of = rep
+                                    break
+                        crit_detail.append({
+                            "idx": k_idx,
+                            "text": crit_texts[k_idx] if k_idx < len(crit_texts) else f"criterion_{k_idx}",
+                            "mean_score": mean_score,
+                            "is_duplicate": is_dup,
+                            "duplicate_of": dup_of,
+                        })
+
                     # ── Final reward for rollout j ────────────────────────
                     qa = quality_adjustments[indices[j]] if RUBRIC_QUALITY_CONFIG.enabled else 0.0
                     rewards[indices[j]] = consensus + disc_reward + qa
+
+                    rollout_details[j] = {
+                        "n_total": n_total_crit,
+                        "n_unique": n_unique,
+                        "consensus": consensus,
+                        "disc": disc_reward,
+                        "qa": qa,
+                        "reward": rewards[indices[j]].item(),
+                        "criteria": crit_detail,
+                        "clusters": {str(rep): members for rep, members in clusters.items()},
+                    }
 
                     print(f"[MetaReward]   Q{q_idx} R{j}: {n_total_crit} criteria → "
                           f"{n_unique} unique, consensus={consensus:.2f}, "
                           f"disc={disc_reward:.2f}, qa={qa:.2f}, "
                           f"reward={rewards[indices[j]].item():.2f}")
+
+                all_rollout_details[q_idx] = rollout_details
 
             with progress_lock:
                 progress["q_done"] += 1
@@ -457,7 +507,7 @@ class MetaRewardFunction:
         coordinator_pool.shutdown(wait=False)
 
         # ── Log sample rubrics ─────────────────────────────────────────
-        self._log_sample_rubrics(q_items, rewards)
+        self._log_sample_rubrics(q_items, rewards, all_rollout_details)
 
         # ── Rollout logging ────────────────────────────────────────────
         log_step = global_step if global_step is not None else self._step_counter
@@ -468,6 +518,7 @@ class MetaRewardFunction:
             q_items=q_items,
             question_answers=question_answers,
             rewards=rewards,
+            all_rollout_details=all_rollout_details,
         )
 
         print(f"[MetaReward] All rewards computed, mean={rewards.mean():.3f}")
@@ -477,35 +528,66 @@ class MetaRewardFunction:
         self,
         q_items: List[Tuple[str, List[Tuple[int, str]]]],
         rewards: torch.Tensor,
+        all_rollout_details: Dict[int, Dict[int, Dict]],
     ):
-        """Print sample (question, rubrics) pairs to stdout for qualitative monitoring."""
+        """Print detailed (question, rubrics) with per-criterion scores for monitoring."""
         n_to_show = min(1, len(q_items))
+
+        # Compute reward stats for normalization context
+        all_rewards = [rewards[it[0]].item() for _, items in q_items for it in items]
+        r_mean = float(np.mean(all_rewards)) if all_rewards else 0.0
+        r_std = float(np.std(all_rewards)) if len(all_rewards) > 1 else 1.0
+
         print(f"\n{'='*80}")
         print(f"[RubricSample] Step {self._step_counter} — "
               f"{len(q_items)} questions, showing {n_to_show} full example(s)")
+        print(f"[RubricSample] Reward stats: mean={r_mean:.3f}, std={r_std:.3f}")
         print(f"{'='*80}")
 
         for q_idx in range(n_to_show):
             q, items = q_items[q_idx]
-            print(f"\n[Q{q_idx+1}] {q[:300]}")
-            print(f"  ({len(items)} rubrics generated)")
+            details = all_rollout_details.get(q_idx, {})
+            print(f"\n[Q{q_idx+1}] {q}")
+            print(f"  ({len(items)} rollouts)")
+
             for local_i, (global_idx, rubric) in enumerate(items):
                 r = rewards[global_idx].item()
-                rubric_preview = rubric[:500].replace('\n', '\n    ')
-                print(f"  --- Rubric {local_i+1} (reward={r:.3f}) ---")
-                print(f"    {rubric_preview}")
-                if len(rubric) > 500:
-                    print(f"    ... ({len(rubric)} chars total)")
+                norm_r = (r - r_mean) / r_std if r_std > 1e-8 else 0.0
+                detail = details.get(local_i, {})
+
+                print(f"\n  {'─'*70}")
+                print(f"  Rubric {local_i+1}  reward={r:.3f}  "
+                      f"normalized={norm_r:+.3f}  "
+                      f"(consensus={detail.get('consensus', 0):.2f} + "
+                      f"disc={detail.get('disc', 0):.2f} + "
+                      f"qa={detail.get('qa', 0):.2f})")
+                print(f"  Criteria: {detail.get('n_total', '?')} total → "
+                      f"{detail.get('n_unique', '?')} unique")
+
+                # Full rubric text
+                for line in rubric.split('\n'):
+                    print(f"    {line}")
+
+                # Per-criterion scores
+                crit_list = detail.get("criteria", [])
+                if crit_list:
+                    print(f"  Per-criterion scores:")
+                    for c in crit_list:
+                        dup_tag = ""
+                        if c["is_duplicate"]:
+                            dup_tag = f"  [DUP of C{c['duplicate_of']}]"
+                        print(f"    C{c['idx']}: mean={c['mean_score']:.2f}{dup_tag}  {c['text']}")
 
         if len(q_items) > n_to_show:
             print(f"\n[RubricSample] Other questions summary:")
             for q_idx in range(n_to_show, len(q_items)):
                 q, items = q_items[q_idx]
                 rews = [rewards[it[0]].item() for it in items]
-                lens = [len(it[1]) for it in items]
-                print(f"  Q{q_idx+1}: \"{q[:80]}...\" "
-                      f"| {len(items)} rubrics | rewards={[f'{r:.2f}' for r in rews]} "
-                      f"| lengths={lens}")
+                details = all_rollout_details.get(q_idx, {})
+                n_unique_list = [details.get(j, {}).get("n_unique", "?") for j in range(len(items))]
+                print(f"  Q{q_idx+1}: \"{q[:100]}\" "
+                      f"| {len(items)} rollouts | rewards={[f'{r:.2f}' for r in rews]} "
+                      f"| unique_criteria={n_unique_list}")
 
         print(f"{'='*80}\n")
 
@@ -515,8 +597,9 @@ class MetaRewardFunction:
         q_items: List[Tuple[str, List[Tuple[int, str]]]],
         question_answers: Dict[int, Dict[int, str]],
         rewards: torch.Tensor,
+        all_rollout_details: Dict[int, Dict[int, Dict]],
     ):
-        """Save per-step rollout log: question, rubrics, answers, rewards."""
+        """Save per-step rollout log: question, rubrics, answers, rewards, criteria details."""
         log_dir = Path(ROLLOUT_LOG_DIR)
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / f"step_{step:04d}.jsonl"
@@ -525,15 +608,24 @@ class MetaRewardFunction:
             with open(log_file, "w", encoding="utf-8") as f:
                 for q_idx, (q, items) in enumerate(q_items):
                     answers_dict = question_answers.get(q_idx, {})
+                    details = all_rollout_details.get(q_idx, {})
                     rollouts = []
                     for local_i, (global_idx, rubric) in enumerate(items):
+                        detail = details.get(local_i, {})
                         rollouts.append({
-                            "rubric": rubric[:2000],
-                            "answer": answers_dict.get(local_i, "")[:2000],
+                            "rubric": rubric,
+                            "answer": answers_dict.get(local_i, ""),
                             "reward": round(rewards[global_idx].item(), 4),
+                            "consensus": round(detail.get("consensus", 0), 4),
+                            "disc": round(detail.get("disc", 0), 4),
+                            "qa": round(detail.get("qa", 0), 4),
+                            "n_criteria_total": detail.get("n_total", 0),
+                            "n_criteria_unique": detail.get("n_unique", 0),
+                            "criteria": detail.get("criteria", []),
+                            "clusters": detail.get("clusters", {}),
                         })
                     record = {
-                        "question": q[:500],
+                        "question": q,
                         "n_rollouts": len(items),
                         "rollouts": rollouts,
                     }
