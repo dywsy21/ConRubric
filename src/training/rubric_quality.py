@@ -31,7 +31,7 @@ class RubricQualityConfig:
     # penalty = -lambda_token_len * ((tokens - soft_max) / (hard_max - soft_max))^2
     # Quadratic ramp: gentle near soft_max, harsh as tokens approach hard_max.
     lambda_token_len: float = float(os.getenv("GRM_LAMBDA_TOKEN_LEN", "1.5"))
-    token_soft_max: int = int(os.getenv("GRM_TOKEN_SOFT_MAX", "900"))
+    token_soft_max: int = int(os.getenv("GRM_TOKEN_SOFT_MAX", "750"))
     token_hard_max: int = int(os.getenv("GRM_TOKEN_HARD_MAX", "1024"))
 
     # Whether to enable quality scoring at all (master switch)
