@@ -11,3 +11,5 @@ out/
 docs
 .github
 .pytest_cache
+_*
+docs/benchmark_comparison_analysis.md
