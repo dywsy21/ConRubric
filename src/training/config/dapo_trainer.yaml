@@ -40,10 +40,11 @@ actor_rollout_ref:
     strategy: fsdp
     fsdp_config:
       param_offload: True  # offload FSDP params to CPU during rollout for GPU memory
+      optimizer_offload: True  # offload AdamW states to CPU — critical for 8B on single H800
     rollout_n: ${actor_rollout_ref.rollout.n}
     ppo_mini_batch_size: 8
-    ppo_micro_batch_size_per_gpu: 2
-    ppo_max_token_len_per_gpu: 8192
+    ppo_micro_batch_size_per_gpu: 1  # reduced from 2 for 8B memory
+    ppo_max_token_len_per_gpu: 4096  # reduced from 8192 for 8B memory
     ppo_epochs: 2
     shuffle: False
     use_dynamic_bsz: False
@@ -78,9 +79,9 @@ actor_rollout_ref:
     do_sample: True
     prompt_length: ${data.max_prompt_length}
     response_length: ${data.max_response_length}
-    log_prob_micro_batch_size_per_gpu: 2
+    log_prob_micro_batch_size_per_gpu: 1  # reduced from 2 for 8B memory
     dtype: bfloat16
-    gpu_memory_utilization: 0.30
+    gpu_memory_utilization: 0.25  # reduced from 0.30 for 8B model footprint
     max_model_len: 3072             # prompt(2048)+response(1024)=3072
     tensor_model_parallel_size: 1
     max_num_batched_tokens: 8192
@@ -94,7 +95,7 @@ actor_rollout_ref:
       n: 1
       do_sample: False
   ref:
-    log_prob_micro_batch_size_per_gpu: 2
+    log_prob_micro_batch_size_per_gpu: 1  # reduced from 2 for 8B memory
     fsdp_config:
       param_offload: True  # offload ref model params to CPU
 
