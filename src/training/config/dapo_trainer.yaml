@@ -36,14 +36,17 @@ actor_rollout_ref:
       attn_implementation: sdpa
     use_remove_padding: False
     trust_remote_code: True
+    enable_gradient_checkpointing: True  # trade compute for memory (essential for 8B)
   actor:
     strategy: fsdp
     fsdp_config:
-      param_offload: True  # offload FSDP params to CPU during rollout for GPU memory
+      param_offload: True       # offload FSDP params to CPU during rollout for GPU memory
+      optimizer_offload: True    # offload AdamW states to CPU (essential for 8B on 96GB)
+      model_dtype: bf16          # load actor in bf16 (halves VRAM: 16GB vs 32GB for 8B)
     rollout_n: ${actor_rollout_ref.rollout.n}
     ppo_mini_batch_size: 8
-    ppo_micro_batch_size_per_gpu: 2
-    ppo_max_token_len_per_gpu: 8192
+    ppo_micro_batch_size_per_gpu: 1    # reduced for 8B memory
+    ppo_max_token_len_per_gpu: 4096   # reduced for 8B memory
     ppo_epochs: 2
     shuffle: False
     use_dynamic_bsz: False
@@ -78,9 +81,9 @@ actor_rollout_ref:
     do_sample: True
     prompt_length: ${data.max_prompt_length}
     response_length: ${data.max_response_length}
-    log_prob_micro_batch_size_per_gpu: 2
+    log_prob_micro_batch_size_per_gpu: 1   # reduced for 8B memory
     dtype: bfloat16
-    gpu_memory_utilization: 0.30
+    gpu_memory_utilization: 0.25            # reduced for 8B: vLLM gets 24GB (model=16GB + KV=8GB)
     max_model_len: 3072             # prompt(2048)+response(1024)=3072
     tensor_model_parallel_size: 1
     max_num_batched_tokens: 8192
@@ -94,7 +97,7 @@ actor_rollout_ref:
       n: 1
       do_sample: False
   ref:
-    log_prob_micro_batch_size_per_gpu: 2
+    log_prob_micro_batch_size_per_gpu: 1   # reduced for 8B memory
     fsdp_config:
       param_offload: True  # offload ref model params to CPU
 

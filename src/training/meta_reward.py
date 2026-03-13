@@ -35,6 +35,9 @@ from src.training.rubric_quality import (
 # Strip legacy "| tags: ..." suffixes from generated rubric text
 _TAGS_SUFFIX_RE = re.compile(r'\s*\|\s*tags?\s*:.*$', re.IGNORECASE | re.MULTILINE)
 
+# Strip <think>...</think> blocks from instruct/thinking model output
+_THINK_BLOCK_RE = re.compile(r'<think>.*?</think>\s*', re.DOTALL)
+
 # Per-service parallel settings
 DEFAULT_SOLVER_WORKERS = int(os.environ.get("GRM_SOLVER_WORKERS", 4))
 DEFAULT_ORACLE_WORKERS = int(os.environ.get("GRM_ORACLE_WORKERS", 4))
@@ -235,8 +238,10 @@ class MetaRewardFunction:
         # ── Group by question ──────────────────────────────────────────
         q_to_rubrics: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
         for idx, (q, r) in enumerate(zip(questions, rubrics)):
+            # Strip <think>...</think> blocks (instruct/thinking models)
+            r_clean = _THINK_BLOCK_RE.sub('', r)
             # Strip legacy "| tags: ..." suffixes from generated rubric text
-            r_clean = _TAGS_SUFFIX_RE.sub('', r)
+            r_clean = _TAGS_SUFFIX_RE.sub('', r_clean)
             q_to_rubrics[q].append((idx, r_clean))
 
         q_items = list(q_to_rubrics.items())
@@ -250,8 +255,10 @@ class MetaRewardFunction:
         if RUBRIC_QUALITY_CONFIG.enabled:
             _quality_details = []
             for idx, rubric in enumerate(rubrics):
+                # Strip <think> blocks before quality scoring
+                rubric_clean = _THINK_BLOCK_RE.sub('', rubric)
                 tc = response_token_counts[idx] if response_token_counts else 0
-                result = score_rubric_quality(rubric, RUBRIC_QUALITY_CONFIG, token_count=tc)
+                result = score_rubric_quality(rubric_clean, RUBRIC_QUALITY_CONFIG, token_count=tc)
                 quality_adjustments[idx] = result.total_adjustment
                 _quality_details.append(result.detail)
                 if result.detail.get("token_length_penalty", 0.0) < -0.01:
