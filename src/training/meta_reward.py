@@ -57,14 +57,6 @@ ROLLOUT_LOG_DIR = os.environ.get("GRM_ROLLOUT_LOG_DIR", "out/rl/rollout_logs")
 # Using sqrt to prevent reward from exploding with very high variance.
 DISC_SCALE = float(os.environ.get("GRM_DISC_SCALE", "1.0"))
 
-# ── Semantic diversity penalty ────────────────────────────────────────────
-# Penalizes rubrics with low semantic uniqueness (e.g., mirrored [+]/[-] pairs).
-# penalty = -LAMBDA_DIVERSITY * max(0, 1 - unique_ratio / diversity_target)
-# where unique_ratio = n_unique_clusters / n_total_criteria.
-# Default target: 60% unique.  Rubrics below this threshold are penalized.
-LAMBDA_DIVERSITY = float(os.environ.get("GRM_LAMBDA_DIVERSITY", "1.5"))
-DIVERSITY_TARGET = float(os.environ.get("GRM_DIVERSITY_TARGET", "0.6"))
-
 # ── Spearman redundancy parameters ────────────────────────────────────────
 # Threshold for Spearman correlation above which two criteria within the same
 # rollout are considered redundant.  Redundant criteria are counted only once
@@ -517,22 +509,9 @@ class MetaRewardFunction:
                             "duplicate_of": dup_of,
                         })
 
-                    # ── Semantic diversity penalty ─────────────────────────
-                    # Penalize rubrics where n_unique/n_total is below target.
-                    # This discourages mirrored [+]/[-] pairs that inflate
-                    # criteria count without adding evaluation dimensions.
-                    if n_total_crit > 0:
-                        unique_ratio = n_unique / n_total_crit
-                        if unique_ratio < DIVERSITY_TARGET:
-                            diversity_penalty = -LAMBDA_DIVERSITY * (1.0 - unique_ratio / DIVERSITY_TARGET)
-                        else:
-                            diversity_penalty = 0.0
-                    else:
-                        diversity_penalty = 0.0
-
                     # ── Final reward for rollout j ────────────────────────
                     qa = float(quality_adjustments[indices[j]]) if RUBRIC_QUALITY_CONFIG.enabled else 0.0
-                    rewards[indices[j]] = consensus + disc_reward + qa + diversity_penalty
+                    rewards[indices[j]] = consensus + disc_reward + qa
 
                     rollout_details[j] = {
                         "n_total": n_total_crit,
@@ -540,7 +519,6 @@ class MetaRewardFunction:
                         "consensus": consensus,
                         "disc": disc_reward,
                         "qa": qa,
-                        "diversity_penalty": diversity_penalty,
                         "reward": rewards[indices[j]].item(),
                         "criteria": crit_detail,
                         "clusters": {str(rep): members for rep, members in clusters.items()},
@@ -549,7 +527,6 @@ class MetaRewardFunction:
                     print(f"[MetaReward]   Q{q_idx} R{j}: {n_total_crit} criteria → "
                           f"{n_unique} unique, consensus={consensus:.2f}, "
                           f"disc={disc_reward:.2f}, qa={qa:.2f}, "
-                          f"div={diversity_penalty:.2f}, "
                           f"reward={rewards[indices[j]].item():.2f}")
 
                 all_rollout_details[q_idx] = rollout_details
