@@ -328,6 +328,17 @@ class RayPPOTrainer:
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.role_worker_mapping)
+        # Skip ref policy when neither KL loss nor KL-in-reward is used (saves GPU memory)
+        _needs_kl = (
+            config.actor_rollout_ref.actor.get("use_kl_loss", False)
+            or config.algorithm.get("use_kl_in_reward", False)
+        )
+        if self.use_reference_policy and not _needs_kl:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Disabling reference policy: use_kl_loss=False and use_kl_in_reward=False"
+            )
+            self.use_reference_policy = False
         # legacy reward model implementation
         self.use_rm = need_reward_model(self.role_worker_mapping)
         self.use_reward_loop = self.config.reward_model.use_reward_loop

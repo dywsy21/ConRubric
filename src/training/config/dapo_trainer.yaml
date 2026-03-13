@@ -62,9 +62,9 @@ actor_rollout_ref:
     clip_ratio_high: 0.28
     clip_ratio_c: 3.0
     loss_agg_mode: token-mean
-    use_kl_loss: True               # Enable KL loss to prevent policy drift from SFT
-    kl_loss_coef: 0.025             # KL penalty: 0.01→0.025 to constrain policy drift & entropy explosion
-    kl_loss_type: low_var_kl        # Lower-variance KL estimator
+    use_kl_loss: False              # Disabled: ref policy OOM with 8B on 1 GPU (NO_SHARD FSDP can't offload)
+    kl_loss_coef: 0.025             # (unused when use_kl_loss=False)
+    kl_loss_type: low_var_kl        # (unused when use_kl_loss=False)
     optim:
       lr: 5e-6
       lr_warmup_steps_ratio: 0.05   # 5% warmup (constant schedule with warmup)
