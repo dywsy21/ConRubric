@@ -23,9 +23,14 @@ class RubricQualityConfig:
     """Hyperparameters for rubric quality scoring.  All from env vars."""
 
     # Length penalty: reward -= lambda_len * max(0, n - max_crit) / n
-    lambda_len: float = float(os.getenv("GRM_LAMBDA_LEN", "0.2"))
+    # Increased from 0.2 to 2.0 to meaningfully penalize rubrics with too few criteria.
+    lambda_len: float = float(os.getenv("GRM_LAMBDA_LEN", "2.0"))
     min_criteria: int = int(os.getenv("GRM_MIN_CRITERIA", "3"))
     max_criteria: int = int(os.getenv("GRM_MAX_CRITERIA", "15"))
+
+    # Penalty when rubric has ZERO parseable criteria (reward hacking guard).
+    # Applied as flat negative reward that dominates any consensus score.
+    lambda_zero_criteria: float = float(os.getenv("GRM_LAMBDA_ZERO_CRITERIA", "10.0"))
 
     # Token-level length penalty: penalizes rubrics exceeding token_soft_max tokens.
     # penalty = -lambda_token_len * ((tokens - soft_max) / (hard_max - soft_max))^2
@@ -165,7 +170,11 @@ def score_rubric_quality(
     detail: Dict[str, float] = {}
 
     # ── 1. Length penalty (too many or too few criteria) ────────────────
-    if n > config.max_criteria:
+    if n == 0:
+        # Zero parseable criteria = gibberish / reward hacking.
+        # Apply devastating penalty that dominates any consensus score.
+        len_penalty = -config.lambda_zero_criteria
+    elif n > config.max_criteria:
         excess = (n - config.max_criteria) / n
         len_penalty = -config.lambda_len * excess
     elif n < config.min_criteria:

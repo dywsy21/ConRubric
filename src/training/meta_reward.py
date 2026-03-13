@@ -368,8 +368,10 @@ class MetaRewardFunction:
                 if criteria:
                     criterion_texts = [f"- [{c.sign}] {c.text}" for c in criteria]
                 else:
-                    # Fallback: use the whole rubric text as one criterion
-                    criterion_texts = [rubric_text]
+                    # NO FALLBACK: if no valid criteria parsed, skip oracle evals.
+                    # The reward for this rollout will be quality_adjustment only
+                    # (which is strongly negative due to 0-criteria penalty).
+                    criterion_texts = []
                 rollout_criterion_texts[q_idx][j] = criterion_texts
 
                 # Other answers (exclude answer j)
