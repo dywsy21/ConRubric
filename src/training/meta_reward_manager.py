@@ -131,8 +131,9 @@ class MetaConsensusRewardManager(AbstractRewardManager):
                         w = token_weights[j_tok] if j_tok < len(token_weights) else 1.0
                         rewards[i, j_tok] = float(score) * w
                     eff = sum(token_weights[:resp_len]) / max(resp_len, 1)
+                    n_clusters = round(sum(dup_weights))
                     print(f"[RewardManager] rollout {i}: dup penalty applied, "
-                          f"eff_weight={eff:.3f}, {sum(1 for w in dup_weights if w < 1-1e-6)}/{len(dup_weights)} dup criteria")
+                          f"eff_weight={eff:.3f}, {n_clusters}/{len(dup_weights)} unique criteria")
                 else:
                     rewards[i, :resp_len] = float(score)
             else:
