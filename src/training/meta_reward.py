@@ -564,14 +564,17 @@ class MetaRewardFunction:
         print(f"[MetaReward] All rewards computed, mean={rewards.mean():.3f}")
         return rewards
 
+    # GDPO per-component weights (must match core_algos.GDPO_COMPONENT_WEIGHTS)
+    GDPO_WEIGHTS = {"consensus": 1.0, "disc": 0.3, "qa": 0.1}
+
     @staticmethod
-    def _gdpo_normalize_group(values: List[float], epsilon: float = 1e-6) -> List[float]:
-        """Replicate GDPO within-group normalization for display."""
+    def _gdpo_normalize_group(values: List[float], weight: float = 1.0, epsilon: float = 1e-6) -> List[float]:
+        """Replicate GDPO within-group normalization for display (with weight)."""
         if len(values) <= 1:
             return [0.0] * len(values)
         arr = np.array(values, dtype=np.float64)
         m, s = float(arr.mean()), float(arr.std())
-        return [float((v - m) / (s + epsilon)) for v in values]
+        return [float(weight * (v - m) / (s + epsilon)) for v in values]
 
     def _log_sample_rubrics(
         self,
@@ -601,9 +604,10 @@ class MetaRewardFunction:
             group_cons = [details.get(j, {}).get("consensus", 0.0) for j in range(len(items))]
             group_disc = [details.get(j, {}).get("disc", 0.0) for j in range(len(items))]
             group_qa = [details.get(j, {}).get("qa", 0.0) for j in range(len(items))]
-            norm_cons = self._gdpo_normalize_group(group_cons)
-            norm_disc = self._gdpo_normalize_group(group_disc)
-            norm_qa = self._gdpo_normalize_group(group_qa)
+            w = self.GDPO_WEIGHTS
+            norm_cons = self._gdpo_normalize_group(group_cons, weight=w["consensus"])
+            norm_disc = self._gdpo_normalize_group(group_disc, weight=w["disc"])
+            norm_qa = self._gdpo_normalize_group(group_qa, weight=w["qa"])
 
             print(f"\n[Q{q_idx+1}] {q}")
             print(f"  ({len(items)} rollouts)")
@@ -652,9 +656,9 @@ class MetaRewardFunction:
                 g_cons = [details.get(j, {}).get("consensus", 0.0) for j in range(n)]
                 g_disc = [details.get(j, {}).get("disc", 0.0) for j in range(n)]
                 g_qa = [details.get(j, {}).get("qa", 0.0) for j in range(n)]
-                n_cons = self._gdpo_normalize_group(g_cons)
-                n_disc = self._gdpo_normalize_group(g_disc)
-                n_qa = self._gdpo_normalize_group(g_qa)
+                n_cons = self._gdpo_normalize_group(g_cons, weight=self.GDPO_WEIGHTS["consensus"])
+                n_disc = self._gdpo_normalize_group(g_disc, weight=self.GDPO_WEIGHTS["disc"])
+                n_qa = self._gdpo_normalize_group(g_qa, weight=self.GDPO_WEIGHTS["qa"])
                 gdpo_advs = [n_cons[j] + n_disc[j] + n_qa[j] for j in range(n)]
                 n_unique_list = [details.get(j, {}).get("n_unique", "?") for j in range(n)]
                 rews = [rewards[it[0]].item() for it in items]

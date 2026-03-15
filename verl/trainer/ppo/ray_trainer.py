@@ -242,8 +242,9 @@ def compute_advantage(
                 gdpo_components[comp] = data.non_tensor_batch[comp]
 
         if len(gdpo_components) == 3:
-            # GDPO: normalize each component within group separately, then sum
-            print(f"[GDPO] Per-component normalization: {list(gdpo_components.keys())}")
+            # GDPO: normalize each component within group separately, then weighted sum
+            weights = core_algos.GDPO_COMPONENT_WEIGHTS
+            print(f"[GDPO] Per-component normalization: {list(gdpo_components.keys())}, weights={weights}")
             advantages, returns = core_algos.compute_gdpo_outcome_advantage(
                 response_mask=grpo_calculation_mask,
                 index=data.non_tensor_batch["uid"],

@@ -328,19 +328,30 @@ def compute_grpo_outcome_advantage(
     return scores, scores
 
 
+# GDPO per-component weights: consensus is the primary signal,
+# disc (discrimination) is secondary, qa (quality/formatting) is regularization.
+GDPO_COMPONENT_WEIGHTS = {
+    "reward_consensus": 1.0,
+    "reward_disc": 0.3,
+    "reward_qa": 0.1,
+}
+
+
 def compute_gdpo_outcome_advantage(
     response_mask: torch.Tensor,
     index: np.ndarray,
     component_rewards: dict,
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
+    component_weights: dict | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """GDPO: Per-component GRPO normalization then sum.
+    """GDPO: Per-component GRPO normalization then weighted sum.
 
     Instead of normalizing the sum of reward components, normalize each
-    component independently within its GRPO group, then sum the normalized
-    advantages.  This prevents high-magnitude components (e.g. consensus)
-    from drowning out lower-magnitude signals (e.g. disc, qa).
+    component independently within its GRPO group, then combine with
+    per-component weights.  This prevents high-magnitude components
+    (e.g. consensus) from drowning out lower-magnitude signals (e.g. disc, qa)
+    and allows controlling relative importance of each reward signal.
 
     Reference: GDPO (arXiv:2601.05242)
 
@@ -350,15 +361,20 @@ def compute_gdpo_outcome_advantage(
         component_rewards: {name: np.ndarray of shape (bs,)} scalar rewards per component
         epsilon: small value to avoid division by zero
         norm_adv_by_std_in_grpo: whether to divide by std (True=GRPO, False=Dr.GRPO)
+        component_weights: {name: float} per-component weights (default: GDPO_COMPONENT_WEIGHTS)
 
     Returns:
         advantages, returns: both (bs, response_length)
     """
+    if component_weights is None:
+        component_weights = GDPO_COMPONENT_WEIGHTS
+
     bsz = response_mask.shape[0]
     combined_scores = torch.zeros(bsz, dtype=torch.float32)
 
     with torch.no_grad():
         for comp_name, comp_values in component_rewards.items():
+            w = component_weights.get(comp_name, 1.0)
             scores_comp = torch.tensor(comp_values, dtype=torch.float32)
 
             # Group-level normalization (same logic as GRPO)
@@ -386,7 +402,7 @@ def compute_gdpo_outcome_advantage(
                 else:
                     scores_comp[i] = scores_comp[i] - id2mean[index[i]]
 
-            combined_scores = combined_scores + scores_comp
+            combined_scores = combined_scores + w * scores_comp
 
         # Expand to token level
         advantages = combined_scores.unsqueeze(-1) * response_mask
