@@ -237,11 +237,11 @@ def compute_advantage(
 
         # GDPO: check for per-component reward scalars (from MetaConsensusRewardManager)
         gdpo_components = {}
-        for comp in ["reward_consensus", "reward_disc", "reward_qa"]:
+        for comp in ["reward_consensus", "reward_disc", "reward_qa", "reward_div"]:
             if comp in data.non_tensor_batch:
                 gdpo_components[comp] = data.non_tensor_batch[comp]
 
-        if len(gdpo_components) == 3:
+        if len(gdpo_components) == 4:
             # GDPO: normalize each component within group separately, then weighted sum
             weights = core_algos.GDPO_COMPONENT_WEIGHTS
             print(f"[GDPO] Per-component normalization: {list(gdpo_components.keys())}, weights={weights}")
