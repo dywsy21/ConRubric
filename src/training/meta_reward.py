@@ -564,6 +564,15 @@ class MetaRewardFunction:
         print(f"[MetaReward] All rewards computed, mean={rewards.mean():.3f}")
         return rewards
 
+    @staticmethod
+    def _gdpo_normalize_group(values: List[float], epsilon: float = 1e-6) -> List[float]:
+        """Replicate GDPO within-group normalization for display."""
+        if len(values) <= 1:
+            return [0.0] * len(values)
+        arr = np.array(values, dtype=np.float64)
+        m, s = float(arr.mean()), float(arr.std())
+        return [float((v - m) / (s + epsilon)) for v in values]
+
     def _log_sample_rubrics(
         self,
         q_items: List[Tuple[str, List[Tuple[int, str]]]],
@@ -573,7 +582,7 @@ class MetaRewardFunction:
         """Print detailed (question, rubrics) with per-criterion scores for monitoring."""
         n_to_show = min(1, len(q_items))
 
-        # Compute reward stats for normalization context
+        # Compute reward stats for context
         all_rewards = [rewards[it[0]].item() for _, items in q_items for it in items]
         r_mean = float(np.mean(all_rewards)) if all_rewards else 0.0
         r_std = float(np.std(all_rewards)) if len(all_rewards) > 1 else 1.0
@@ -587,20 +596,35 @@ class MetaRewardFunction:
         for q_idx in range(n_to_show):
             q, items = q_items[q_idx]
             details = all_rollout_details.get(q_idx, {})
+
+            # Compute GDPO per-component within-group normalization
+            group_cons = [details.get(j, {}).get("consensus", 0.0) for j in range(len(items))]
+            group_disc = [details.get(j, {}).get("disc", 0.0) for j in range(len(items))]
+            group_qa = [details.get(j, {}).get("qa", 0.0) for j in range(len(items))]
+            norm_cons = self._gdpo_normalize_group(group_cons)
+            norm_disc = self._gdpo_normalize_group(group_disc)
+            norm_qa = self._gdpo_normalize_group(group_qa)
+
             print(f"\n[Q{q_idx+1}] {q}")
             print(f"  ({len(items)} rollouts)")
+            print(f"  Group stats: consensus μ={np.mean(group_cons):.2f} σ={np.std(group_cons):.2f}, "
+                  f"disc μ={np.mean(group_disc):.2f} σ={np.std(group_disc):.2f}, "
+                  f"qa μ={np.mean(group_qa):.2f} σ={np.std(group_qa):.2f}")
 
             for local_i, (global_idx, rubric) in enumerate(items):
                 r = rewards[global_idx].item()
-                norm_r = (r - r_mean) / r_std if r_std > 1e-8 else 0.0
                 detail = details.get(local_i, {})
+                cons_raw = detail.get('consensus', 0.0)
+                disc_raw = detail.get('disc', 0.0)
+                qa_raw = detail.get('qa', 0.0)
+                gdpo_adv = norm_cons[local_i] + norm_disc[local_i] + norm_qa[local_i]
 
                 print(f"\n  {'─'*70}")
                 print(f"  Rubric {local_i+1}  reward={r:.3f}  "
-                      f"normalized={norm_r:+.3f}  "
-                      f"(consensus={detail.get('consensus', 0):.2f} + "
-                      f"disc={detail.get('disc', 0):.2f} + "
-                      f"qa={detail.get('qa', 0):.2f})")
+                      f"gdpo_adv={gdpo_adv:+.3f}")
+                print(f"    consensus={cons_raw:.2f} → {norm_cons[local_i]:+.3f}  |  "
+                      f"disc={disc_raw:.2f} → {norm_disc[local_i]:+.3f}  |  "
+                      f"qa={qa_raw:.2f} → {norm_qa[local_i]:+.3f}")
                 print(f"  Criteria: {detail.get('n_total', '?')} total → "
                       f"{detail.get('n_unique', '?')} unique")
 
@@ -622,12 +646,22 @@ class MetaRewardFunction:
             print(f"\n[RubricSample] Other questions summary:")
             for q_idx in range(n_to_show, len(q_items)):
                 q, items = q_items[q_idx]
-                rews = [rewards[it[0]].item() for it in items]
                 details = all_rollout_details.get(q_idx, {})
-                n_unique_list = [details.get(j, {}).get("n_unique", "?") for j in range(len(items))]
-                print(f"  Q{q_idx+1}: \"{q[:100]}\" "
-                      f"| {len(items)} rollouts | rewards={[f'{r:.2f}' for r in rews]} "
-                      f"| unique_criteria={n_unique_list}")
+                n = len(items)
+                # Compute GDPO summary
+                g_cons = [details.get(j, {}).get("consensus", 0.0) for j in range(n)]
+                g_disc = [details.get(j, {}).get("disc", 0.0) for j in range(n)]
+                g_qa = [details.get(j, {}).get("qa", 0.0) for j in range(n)]
+                n_cons = self._gdpo_normalize_group(g_cons)
+                n_disc = self._gdpo_normalize_group(g_disc)
+                n_qa = self._gdpo_normalize_group(g_qa)
+                gdpo_advs = [n_cons[j] + n_disc[j] + n_qa[j] for j in range(n)]
+                n_unique_list = [details.get(j, {}).get("n_unique", "?") for j in range(n)]
+                rews = [rewards[it[0]].item() for it in items]
+                print(f"  Q{q_idx+1}: \"{q[:80]}\" | {n} rollouts "
+                      f"| reward={[f'{r:.1f}' for r in rews]} "
+                      f"| gdpo_adv={[f'{a:+.2f}' for a in gdpo_advs]} "
+                      f"| unique={n_unique_list}")
 
         print(f"{'='*80}\n")
 
