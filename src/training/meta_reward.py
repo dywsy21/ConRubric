@@ -529,12 +529,25 @@ class MetaRewardFunction:
                         "clusters": {str(rep): members for rep, members in clusters.items()},
                     }
 
-                    print(f"[MetaReward]   Q{q_idx} R{j}: {n_total_crit} criteria → "
-                          f"{n_unique} unique, consensus={consensus:.2f}, "
-                          f"disc={disc_reward:.2f}, qa={qa:.2f}, "
-                          f"reward={rewards[indices[j]].item():.2f}")
-
                 all_rollout_details[q_idx] = rollout_details
+
+                # ── GDPO-annotated per-rollout summary for this question ──
+                w = self.GDPO_WEIGHTS
+                g_cons = [rollout_details[j].get("consensus", 0.0) for j in range(n)]
+                g_disc = [rollout_details[j].get("disc", 0.0) for j in range(n)]
+                g_qa = [rollout_details[j].get("qa", 0.0) for j in range(n)]
+                n_cons = self._gdpo_normalize_group(g_cons, weight=w["consensus"])
+                n_disc = self._gdpo_normalize_group(g_disc, weight=w["disc"])
+                n_qa = self._gdpo_normalize_group(g_qa, weight=w["qa"])
+                for j in range(n):
+                    rd = rollout_details[j]
+                    gdpo_adv = n_cons[j] + n_disc[j] + n_qa[j]
+                    print(f"[MetaReward]   Q{q_idx} R{j}: {rd['n_total']} criteria → "
+                          f"{rd['n_unique']} unique, reward={rd['reward']:.2f}  "
+                          f"gdpo={gdpo_adv:+.3f}  "
+                          f"cons={rd['consensus']:.2f}(×{w['consensus']:.1f}→{n_cons[j]:+.3f})  "
+                          f"disc={rd['disc']:.2f}(×{w['disc']:.1f}→{n_disc[j]:+.3f})  "
+                          f"qa={rd['qa']:.2f}(×{w['qa']:.1f}→{n_qa[j]:+.3f})")
 
             with progress_lock:
                 progress["q_done"] += 1
@@ -610,7 +623,7 @@ class MetaRewardFunction:
             norm_qa = self._gdpo_normalize_group(group_qa, weight=w["qa"])
 
             print(f"\n[Q{q_idx+1}] {q}")
-            print(f"  ({len(items)} rollouts)")
+            print(f"  ({len(items)} rollouts)  GDPO weights: cons={w['consensus']:.1f}, disc={w['disc']:.1f}, qa={w['qa']:.1f}")
             print(f"  Group stats: consensus μ={np.mean(group_cons):.2f} σ={np.std(group_cons):.2f}, "
                   f"disc μ={np.mean(group_disc):.2f} σ={np.std(group_disc):.2f}, "
                   f"qa μ={np.mean(group_qa):.2f} σ={np.std(group_qa):.2f}")
@@ -626,9 +639,9 @@ class MetaRewardFunction:
                 print(f"\n  {'─'*70}")
                 print(f"  Rubric {local_i+1}  reward={r:.3f}  "
                       f"gdpo_adv={gdpo_adv:+.3f}")
-                print(f"    consensus={cons_raw:.2f} → {norm_cons[local_i]:+.3f}  |  "
-                      f"disc={disc_raw:.2f} → {norm_disc[local_i]:+.3f}  |  "
-                      f"qa={qa_raw:.2f} → {norm_qa[local_i]:+.3f}")
+                print(f"    cons={cons_raw:.2f}(×{w['consensus']:.1f}→{norm_cons[local_i]:+.3f})  |  "
+                      f"disc={disc_raw:.2f}(×{w['disc']:.1f}→{norm_disc[local_i]:+.3f})  |  "
+                      f"qa={qa_raw:.2f}(×{w['qa']:.1f}→{norm_qa[local_i]:+.3f})")
                 print(f"  Criteria: {detail.get('n_total', '?')} total → "
                       f"{detail.get('n_unique', '?')} unique")
 
