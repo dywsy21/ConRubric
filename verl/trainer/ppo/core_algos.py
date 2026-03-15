@@ -328,6 +328,72 @@ def compute_grpo_outcome_advantage(
     return scores, scores
 
 
+def compute_gdpo_outcome_advantage(
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    component_rewards: dict,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """GDPO: Per-component GRPO normalization then sum.
+
+    Instead of normalizing the sum of reward components, normalize each
+    component independently within its GRPO group, then sum the normalized
+    advantages.  This prevents high-magnitude components (e.g. consensus)
+    from drowning out lower-magnitude signals (e.g. disc, qa).
+
+    Reference: GDPO (arXiv:2601.05242)
+
+    Args:
+        response_mask: (bs, response_length)
+        index: grouping array (same semantics as GRPO uid)
+        component_rewards: {name: np.ndarray of shape (bs,)} scalar rewards per component
+        epsilon: small value to avoid division by zero
+        norm_adv_by_std_in_grpo: whether to divide by std (True=GRPO, False=Dr.GRPO)
+
+    Returns:
+        advantages, returns: both (bs, response_length)
+    """
+    bsz = response_mask.shape[0]
+    combined_scores = torch.zeros(bsz, dtype=torch.float32)
+
+    with torch.no_grad():
+        for comp_name, comp_values in component_rewards.items():
+            scores_comp = torch.tensor(comp_values, dtype=torch.float32)
+
+            # Group-level normalization (same logic as GRPO)
+            id2score = defaultdict(list)
+            id2mean = {}
+            id2std = {}
+
+            for i in range(bsz):
+                id2score[index[i]].append(scores_comp[i])
+
+            for idx in id2score:
+                if len(id2score[idx]) == 1:
+                    id2mean[idx] = torch.tensor(0.0)
+                    id2std[idx] = torch.tensor(1.0)
+                elif len(id2score[idx]) > 1:
+                    scores_tensor = torch.stack(id2score[idx])
+                    id2mean[idx] = torch.mean(scores_tensor)
+                    id2std[idx] = torch.std(scores_tensor)
+                else:
+                    raise ValueError(f"no score in prompt index: {idx}")
+
+            for i in range(bsz):
+                if norm_adv_by_std_in_grpo:
+                    scores_comp[i] = (scores_comp[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+                else:
+                    scores_comp[i] = scores_comp[i] - id2mean[index[i]]
+
+            combined_scores = combined_scores + scores_comp
+
+        # Expand to token level
+        advantages = combined_scores.unsqueeze(-1) * response_mask
+
+    return advantages, advantages
+
+
 @register_adv_est(AdvantageEstimator.GRPO_VECTORIZED)
 def compute_grpo_vectorized_outcome_advantage(
     token_level_rewards: torch.Tensor,

@@ -235,13 +235,29 @@ def compute_advantage(
         # Initialize the mask for GRPO calculation
         grpo_calculation_mask = data.batch["response_mask"]
 
-        # Call compute_grpo_outcome_advantage with parameters matching its definition
-        advantages, returns = core_algos.compute_grpo_outcome_advantage(
-            token_level_rewards=data.batch["token_level_rewards"],
-            response_mask=grpo_calculation_mask,
-            index=data.non_tensor_batch["uid"],
-            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-        )
+        # GDPO: check for per-component reward scalars (from MetaConsensusRewardManager)
+        gdpo_components = {}
+        for comp in ["reward_consensus", "reward_disc", "reward_qa"]:
+            if comp in data.non_tensor_batch:
+                gdpo_components[comp] = data.non_tensor_batch[comp]
+
+        if len(gdpo_components) == 3:
+            # GDPO: normalize each component within group separately, then sum
+            print(f"[GDPO] Per-component normalization: {list(gdpo_components.keys())}")
+            advantages, returns = core_algos.compute_gdpo_outcome_advantage(
+                response_mask=grpo_calculation_mask,
+                index=data.non_tensor_batch["uid"],
+                component_rewards=gdpo_components,
+                norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            )
+        else:
+            # Fallback: standard GRPO (single combined reward)
+            advantages, returns = core_algos.compute_grpo_outcome_advantage(
+                token_level_rewards=data.batch["token_level_rewards"],
+                response_mask=grpo_calculation_mask,
+                index=data.non_tensor_batch["uid"],
+                norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
     else:

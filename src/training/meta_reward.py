@@ -56,7 +56,7 @@ ROLLOUT_LOG_DIR = os.environ.get("GRM_ROLLOUT_LOG_DIR", "out/rl/rollout_logs")
 # reward_disc = DISC_SCALE * sqrt(variance_of_scores)
 # Using sqrt to prevent reward from exploding with very high variance.
 DISC_SCALE = float(os.environ.get("GRM_DISC_SCALE", "1.0"))
-
+# consensus reward + DISC_SCALE * discrimination reward → total meta-reward for rollout.  Adjusted
 # ── Spearman redundancy parameters ────────────────────────────────────────
 # Threshold for Spearman correlation above which two criteria within the same
 # rollout are considered redundant.  Redundant criteria are counted only once
@@ -249,6 +249,8 @@ class MetaRewardFunction:
 
         rewards = torch.zeros(len(questions), dtype=torch.float32)
         self._dup_criterion_weights = {}  # reset per batch
+        # GDPO: per-component rewards for decoupled normalization
+        self._component_rewards: Dict[int, Tuple[float, float, float]] = {}  # idx -> (consensus, disc, qa)
 
         # ── Pre-compute rubric quality adjustments ─────────────────────
         quality_adjustments = np.zeros(len(questions), dtype=np.float32)
@@ -417,6 +419,7 @@ class MetaRewardFunction:
                 # Single rollout: quality adjustment only (no cross-evaluation)
                 qa = float(quality_adjustments[indices[0]]) if RUBRIC_QUALITY_CONFIG.enabled else 0.0
                 rewards[indices[0]] = qa
+                self._component_rewards[indices[0]] = (0.0, 0.0, qa)
                 all_rollout_details[q_idx] = {}
             else:
                 # Build per-criterion score matrix:
@@ -512,6 +515,8 @@ class MetaRewardFunction:
                     # ── Final reward for rollout j ────────────────────────
                     qa = float(quality_adjustments[indices[j]]) if RUBRIC_QUALITY_CONFIG.enabled else 0.0
                     rewards[indices[j]] = consensus + disc_reward + qa
+                    # GDPO: store per-component rewards for decoupled normalization
+                    self._component_rewards[indices[j]] = (consensus, disc_reward, qa)
 
                     rollout_details[j] = {
                         "n_total": n_total_crit,
