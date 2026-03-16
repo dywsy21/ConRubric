@@ -478,10 +478,6 @@ class MetaRewardFunction:
                         print(f"[MetaReward] Eval error Q{q_idx} R{j} C{k}: {e}")
                         crit_scores[j][k] = {}
 
-                # ── Concept diversity within this question group ─────
-                group_rubric_texts = [it[1] for it in items]
-                diversity_scores = _compute_group_diversity(group_rubric_texts)
-
                 # Per-rollout: Spearman dedup → consensus + discrimination
                 # Store per-criterion detail for logging
                 rollout_details: Dict[int, Dict] = {}
@@ -558,10 +554,9 @@ class MetaRewardFunction:
 
                     # ── Final reward for rollout j ────────────────────────
                     qa = float(quality_adjustments[indices[j]]) if RUBRIC_QUALITY_CONFIG.enabled else 0.0
-                    div = diversity_scores[j]
                     rewards[indices[j]] = consensus + disc_reward + qa
                     # GDPO: store per-component rewards for decoupled normalization
-                    self._component_rewards[indices[j]] = (consensus, disc_reward, qa, div)
+                    self._component_rewards[indices[j]] = (consensus, disc_reward, qa)
 
                     rollout_details[j] = {
                         "n_total": n_total_crit,
@@ -569,7 +564,6 @@ class MetaRewardFunction:
                         "consensus": consensus,
                         "disc": disc_reward,
                         "qa": qa,
-                        "div": div,
                         "reward": rewards[indices[j]].item(),
                         "criteria": crit_detail,
                         "clusters": {str(rep): members for rep, members in clusters.items()},
@@ -582,21 +576,18 @@ class MetaRewardFunction:
                 g_cons = [rollout_details[j].get("consensus", 0.0) for j in range(n)]
                 g_disc = [rollout_details[j].get("disc", 0.0) for j in range(n)]
                 g_qa = [rollout_details[j].get("qa", 0.0) for j in range(n)]
-                g_div = [rollout_details[j].get("div", 0.0) for j in range(n)]
                 n_cons = self._gdpo_normalize_group(g_cons, weight=w["consensus"])
                 n_disc = self._gdpo_normalize_group(g_disc, weight=w["disc"])
                 n_qa = self._gdpo_normalize_group(g_qa, weight=w["qa"])
-                n_div = self._gdpo_normalize_group(g_div, weight=w["div"])
                 for j in range(n):
                     rd = rollout_details[j]
-                    gdpo_adv = n_cons[j] + n_disc[j] + n_qa[j] + n_div[j]
+                    gdpo_adv = n_cons[j] + n_disc[j] + n_qa[j]
                     print(f"[MetaReward]   Q{q_idx} R{j}: {rd['n_total']} criteria → "
                           f"{rd['n_unique']} unique, reward={rd['reward']:.2f}  "
                           f"gdpo={gdpo_adv:+.3f}  "
                           f"cons={rd['consensus']:.2f}(×{w['consensus']:.1f}→{n_cons[j]:+.3f})  "
                           f"disc={rd['disc']:.2f}(×{w['disc']:.1f}→{n_disc[j]:+.3f})  "
-                          f"qa={rd['qa']:.2f}(×{w['qa']:.1f}→{n_qa[j]:+.3f})  "
-                          f"div={rd['div']:.2f}(×{w['div']:.1f}→{n_div[j]:+.3f})")
+                          f"qa={rd['qa']:.2f}(×{w['qa']:.1f}→{n_qa[j]:+.3f})")
 
             with progress_lock:
                 progress["q_done"] += 1
@@ -627,7 +618,7 @@ class MetaRewardFunction:
         return rewards
 
     # GDPO per-component weights (must match core_algos.GDPO_COMPONENT_WEIGHTS)
-    GDPO_WEIGHTS = {"consensus": 1.0, "disc": 0.3, "qa": 0.1, "div": 0.2}
+    GDPO_WEIGHTS = {"consensus": 1.0, "disc": 0.3, "qa": 0.1}
 
     @staticmethod
     def _gdpo_normalize_group(values: List[float], weight: float = 1.0, epsilon: float = 1e-6) -> List[float]:
@@ -666,19 +657,16 @@ class MetaRewardFunction:
             group_cons = [details.get(j, {}).get("consensus", 0.0) for j in range(len(items))]
             group_disc = [details.get(j, {}).get("disc", 0.0) for j in range(len(items))]
             group_qa = [details.get(j, {}).get("qa", 0.0) for j in range(len(items))]
-            group_div = [details.get(j, {}).get("div", 0.0) for j in range(len(items))]
             w = self.GDPO_WEIGHTS
             norm_cons = self._gdpo_normalize_group(group_cons, weight=w["consensus"])
             norm_disc = self._gdpo_normalize_group(group_disc, weight=w["disc"])
             norm_qa = self._gdpo_normalize_group(group_qa, weight=w["qa"])
-            norm_div = self._gdpo_normalize_group(group_div, weight=w["div"])
 
             print(f"\n[Q{q_idx+1}] {q}")
-            print(f"  ({len(items)} rollouts)  GDPO weights: cons={w['consensus']:.1f}, disc={w['disc']:.1f}, qa={w['qa']:.1f}, div={w['div']:.1f}")
+            print(f"  ({len(items)} rollouts)  GDPO weights: cons={w['consensus']:.1f}, disc={w['disc']:.1f}, qa={w['qa']:.1f}")
             print(f"  Group stats: consensus μ={np.mean(group_cons):.2f} σ={np.std(group_cons):.2f}, "
                   f"disc μ={np.mean(group_disc):.2f} σ={np.std(group_disc):.2f}, "
-                  f"qa μ={np.mean(group_qa):.2f} σ={np.std(group_qa):.2f}, "
-                  f"div μ={np.mean(group_div):.2f} σ={np.std(group_div):.2f}")
+                  f"qa μ={np.mean(group_qa):.2f} σ={np.std(group_qa):.2f}")
 
             for local_i, (global_idx, rubric) in enumerate(items):
                 r = rewards[global_idx].item()
@@ -686,16 +674,14 @@ class MetaRewardFunction:
                 cons_raw = detail.get('consensus', 0.0)
                 disc_raw = detail.get('disc', 0.0)
                 qa_raw = detail.get('qa', 0.0)
-                div_raw = detail.get('div', 0.0)
-                gdpo_adv = norm_cons[local_i] + norm_disc[local_i] + norm_qa[local_i] + norm_div[local_i]
+                gdpo_adv = norm_cons[local_i] + norm_disc[local_i] + norm_qa[local_i]
 
                 print(f"\n  {'─'*70}")
                 print(f"  Rubric {local_i+1}  reward={r:.3f}  "
                       f"gdpo_adv={gdpo_adv:+.3f}")
                 print(f"    cons={cons_raw:.2f}(×{w['consensus']:.1f}→{norm_cons[local_i]:+.3f})  |  "
                       f"disc={disc_raw:.2f}(×{w['disc']:.1f}→{norm_disc[local_i]:+.3f})  |  "
-                      f"qa={qa_raw:.2f}(×{w['qa']:.1f}→{norm_qa[local_i]:+.3f})  |  "
-                      f"div={div_raw:.2f}(×{w['div']:.1f}→{norm_div[local_i]:+.3f})")
+                      f"qa={qa_raw:.2f}(×{w['qa']:.1f}→{norm_qa[local_i]:+.3f})")
                 print(f"  Criteria: {detail.get('n_total', '?')} total → "
                       f"{detail.get('n_unique', '?')} unique")
 
@@ -723,12 +709,10 @@ class MetaRewardFunction:
                 g_cons = [details.get(j, {}).get("consensus", 0.0) for j in range(n)]
                 g_disc = [details.get(j, {}).get("disc", 0.0) for j in range(n)]
                 g_qa = [details.get(j, {}).get("qa", 0.0) for j in range(n)]
-                g_div = [details.get(j, {}).get("div", 0.0) for j in range(n)]
                 n_cons = self._gdpo_normalize_group(g_cons, weight=self.GDPO_WEIGHTS["consensus"])
                 n_disc = self._gdpo_normalize_group(g_disc, weight=self.GDPO_WEIGHTS["disc"])
                 n_qa = self._gdpo_normalize_group(g_qa, weight=self.GDPO_WEIGHTS["qa"])
-                n_div = self._gdpo_normalize_group(g_div, weight=self.GDPO_WEIGHTS["div"])
-                gdpo_advs = [n_cons[j] + n_disc[j] + n_qa[j] + n_div[j] for j in range(n)]
+                gdpo_advs = [n_cons[j] + n_disc[j] + n_qa[j] for j in range(n)]
                 n_unique_list = [details.get(j, {}).get("n_unique", "?") for j in range(n)]
                 rews = [rewards[it[0]].item() for it in items]
                 print(f"  Q{q_idx+1}: \"{q[:80]}\" | {n} rollouts "
@@ -780,7 +764,6 @@ class MetaRewardFunction:
                             "consensus": round(detail.get("consensus", 0), 4),
                             "disc": round(detail.get("disc", 0), 4),
                             "qa": round(detail.get("qa", 0), 4),
-                            "div": round(detail.get("div", 0), 4),
                             "n_criteria_total": detail.get("n_total", 0),
                             "n_criteria_unique": detail.get("n_unique", 0),
                             "criteria": detail.get("criteria", []),

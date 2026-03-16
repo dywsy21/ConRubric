@@ -334,7 +334,6 @@ GDPO_COMPONENT_WEIGHTS = {
     "reward_consensus": 1.0,
     "reward_disc": 0.3,
     "reward_qa": 0.1,
-    "reward_div": 0.2,
 }
 
 

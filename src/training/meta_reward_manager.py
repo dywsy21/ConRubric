@@ -142,11 +142,10 @@ class MetaConsensusRewardManager(AbstractRewardManager):
             reward_extra_info["score"].append(float(score))
 
             # GDPO: store per-component scalar rewards for decoupled normalization
-            comp = self.reward_fn._component_rewards.get(i, (0.0, 0.0, 0.0, 0.0))
+            comp = self.reward_fn._component_rewards.get(i, (0.0, 0.0, 0.0))
             reward_extra_info["reward_consensus"].append(float(comp[0]))
             reward_extra_info["reward_disc"].append(float(comp[1]))
             reward_extra_info["reward_qa"].append(float(comp[2]))
-            reward_extra_info["reward_div"].append(float(comp[3]))
 
         if return_dict:
             return {"reward_tensor": rewards, "reward_extra_info": reward_extra_info}
