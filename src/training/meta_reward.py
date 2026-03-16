@@ -55,11 +55,14 @@ RUBRIC_QUALITY_CONFIG = RubricQualityConfig()
 ROLLOUT_LOG_DIR = os.environ.get("GRM_ROLLOUT_LOG_DIR", "out/rl/rollout_logs")
 
 # ── Discrimination reward parameters ──────────────────────────────────────
-# Scale factor for variance-based reward.
-# reward_disc = DISC_SCALE * sqrt(variance_of_scores)
-# Using sqrt to prevent reward from exploding with very high variance.
+# Thresholded power-variance discrimination: criteria with std < DISC_STD_FLOOR
+# are considered non-discriminative and get disc_k = 0 (hard zero floor).
+# For discriminative criteria: disc_k = (std_k - DISC_STD_FLOOR) ^ DISC_POWER.
+# This creates strong separation: generic criteria → 0, specific criteria → high.
+# Oracle scores are [0,10], so std range is [0, ~5].
 DISC_SCALE = float(os.environ.get("GRM_DISC_SCALE", "1.0"))
-# consensus reward + DISC_SCALE * discrimination reward → total meta-reward for rollout.  Adjusted
+DISC_STD_FLOOR = float(os.environ.get("GRM_DISC_STD_FLOOR", "0.5"))  # std below this → disc=0
+DISC_POWER = float(os.environ.get("GRM_DISC_POWER", "2.0"))  # power > 1 amplifies separation
 # ── Spearman redundancy parameters ────────────────────────────────────────
 # Threshold for Spearman correlation above which two criteria within the same
 # rollout are considered redundant.  Redundant criteria are counted only once
@@ -253,7 +256,9 @@ class MetaRewardFunction:
             5. Consensus: for each other answer, mean of unique criteria scores
                → consensus_j = mean across other answers
             6. Discrimination: for each unique criterion,
-               disc_k = sqrt(var(scores_k)) → disc_j = mean(disc_k) * DISC_SCALE
+               std_k < DISC_STD_FLOOR → disc_k = 0 (non-discriminative)
+               else → disc_k = (std_k - DISC_STD_FLOOR) ^ DISC_POWER
+               disc_j = mean(disc_k) * DISC_SCALE (zeros included in mean)
             7. Final reward = consensus + disc + quality_adjustment
             8. Reward applied uniformly to all response tokens (per-token)
         """
@@ -272,7 +277,8 @@ class MetaRewardFunction:
               f"(global_step={self._step_counter}), "
               f"solver_workers={solver_workers}, oracle_workers={oracle_workers}, "
               f"solver_n={solver_n or 'all'}, "
-              f"disc_scale={DISC_SCALE}, spearman_threshold={SPEARMAN_THRESHOLD}, "
+              f"disc_scale={DISC_SCALE}, disc_std_floor={DISC_STD_FLOOR}, "
+              f"disc_power={DISC_POWER}, spearman_threshold={SPEARMAN_THRESHOLD}, "
               f"rubric_quality={RUBRIC_QUALITY_CONFIG.enabled}")
 
         # ── Group by question ──────────────────────────────────────────
@@ -521,14 +527,22 @@ class MetaRewardFunction:
                             consensus_per_answer.append(np.mean(crit_vals))
                     consensus = float(np.mean(consensus_per_answer)) if consensus_per_answer else 0.0
 
-                    # ── Discrimination: for each unique criterion,
-                    # disc_k = sqrt(var(scores_k across answers)).
-                    # Rollout disc = mean(disc_k) * DISC_SCALE.
+                    # ── Discrimination: thresholded power-variance.
+                    # For each unique criterion k:
+                    #   std_k < DISC_STD_FLOOR → disc_k = 0 (non-discriminative)
+                    #   else → disc_k = (std_k - DISC_STD_FLOOR) ^ DISC_POWER
+                    # Rollout disc = mean(disc_k) * DISC_SCALE (zeros included).
                     disc_values = []
+                    n_discriminative = 0
                     for uk in unique_reps:
                         score_list = list(j_crit.get(uk, {}).values())
                         if len(score_list) >= 2:
-                            disc_values.append(np.sqrt(np.var(score_list)))
+                            std_k = float(np.std(score_list))
+                            if std_k < DISC_STD_FLOOR:
+                                disc_values.append(0.0)
+                            else:
+                                disc_values.append((std_k - DISC_STD_FLOOR) ** DISC_POWER)
+                                n_discriminative += 1
                     disc_reward = float(DISC_SCALE * np.mean(disc_values)) if disc_values else 0.0
 
                     # ── Per-criterion detail (for logging) ────────────────
@@ -618,7 +632,7 @@ class MetaRewardFunction:
         return rewards
 
     # GDPO per-component weights (must match core_algos.GDPO_COMPONENT_WEIGHTS)
-    GDPO_WEIGHTS = {"consensus": 1.0, "disc": 0.3, "qa": 0.1}
+    GDPO_WEIGHTS = {"consensus": 1.0, "disc": 1.5, "qa": 0.1}
 
     @staticmethod
     def _gdpo_normalize_group(values: List[float], weight: float = 1.0, epsilon: float = 1e-6) -> List[float]:
