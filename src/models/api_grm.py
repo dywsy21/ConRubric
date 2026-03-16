@@ -72,7 +72,7 @@ class APIRubricGenerator:
         max_tokens: int = 4096,
         temperature: float = 0.7,
         thinking: bool = True,
-        max_retries: int = 3,
+        max_retries: int = 6,
     ):
         self.api_base = api_base.rstrip("/")
         self.api_key = api_key
@@ -103,10 +103,10 @@ class APIRubricGenerator:
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                resp = requests.post(url, headers=headers, json=body, timeout=120)
+                resp = requests.post(url, headers=headers, json=body, timeout=180)
                 if resp.status_code == 429:
-                    wait = min(2 ** (attempt + 1), 30)
-                    print(f"Rate limited, waiting {wait}s (attempt {attempt})...")
+                    wait = min(5 * (2 ** attempt), 120)
+                    print(f"Rate limited (429), waiting {wait}s (attempt {attempt}/{self.max_retries})...")
                     time.sleep(wait)
                     continue
                 resp.raise_for_status()
@@ -114,9 +114,9 @@ class APIRubricGenerator:
                 content = data["choices"][0]["message"]["content"]
                 return content
             except requests.exceptions.HTTPError as e:
-                if "429" in str(e) and attempt < self.max_retries:
-                    wait = min(2 ** (attempt + 1), 30)
-                    print(f"Rate limited, waiting {wait}s...")
+                if "429" in str(e):
+                    wait = min(5 * (2 ** attempt), 120)
+                    print(f"Rate limited (429), waiting {wait}s (attempt {attempt}/{self.max_retries})...")
                     time.sleep(wait)
                     continue
                 if attempt < self.max_retries:
@@ -143,8 +143,8 @@ class APIRubricGenerator:
         result = _clean_output(result)
         if result:
             result = _deduplicate_rubric(result)
-        # Small delay to avoid rate limits
-        time.sleep(0.5)
+        # Delay between calls to avoid rate limits
+        time.sleep(3)
         return result
 
     def generate_batch(self, questions: List[str], batch_size: int = 8) -> List[str]:
