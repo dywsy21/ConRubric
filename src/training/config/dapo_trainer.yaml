@@ -52,9 +52,9 @@ actor_rollout_ref:
     use_dynamic_bsz: False
     # Entropy warmup: start high, decay to min over warmup_steps.
     # Actual scheduling is done in ray_trainer.py _update_actor() via meta_info.
-    entropy_coeff: 0.002
-    entropy_coeff_min: 0.001        # floor after warmup
-    entropy_warmup_steps: 50        # linear decay from entropy_coeff → entropy_coeff_min
+    entropy_coeff: 0.01
+    entropy_coeff_min: 0.01         # flat — sustained exploration mid-training
+    entropy_warmup_steps: 0          # no decay (already past warmup)
     entropy_cap: 1.5                # hard cutoff: zero bonus at cap, penalty above
     grad_clip: 1.0
     clip_ratio: 0.2
