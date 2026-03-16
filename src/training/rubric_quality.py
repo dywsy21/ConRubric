@@ -105,6 +105,9 @@ def parse_rubric_text(rubric_text: str) -> List[ParsedCriterion]:
     """Parse a rubric string into structured criteria.
 
     Tolerates minor formatting variations (bullet style, spacing, sign position).
+    Continuation lines (non-criterion, non-blank lines following a criterion)
+    are appended to the preceding criterion's text — this captures inline
+    explanations the model may produce after the main criterion line.
     Returns an empty list if nothing can be parsed.
     """
     criteria: List[ParsedCriterion] = []
@@ -115,6 +118,9 @@ def parse_rubric_text(rubric_text: str) -> List[ParsedCriterion]:
             sign = _extract_sign(bracket_content)
             text = m.group(2).strip()
             criteria.append(ParsedCriterion(sign=sign, text=text))
+        elif criteria and line.strip():
+            # Continuation line: append to the last criterion's text
+            criteria[-1].text += "\n" + line.strip()
     return criteria
 
 
