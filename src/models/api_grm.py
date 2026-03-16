@@ -86,7 +86,7 @@ class APIRubricGenerator:
               f"thinking={thinking}, max_workers={max_workers}")
 
     def _call_api(self, messages: List[dict]) -> str:
-        """Single API call with retry logic."""
+        """Single API call with retry logic and rate-limit backoff."""
         url = f"{self.api_base}/chat/completions"
         headers = {
             "Content-Type": "application/json",
@@ -104,10 +104,28 @@ class APIRubricGenerator:
         for attempt in range(1, self.max_retries + 1):
             try:
                 resp = requests.post(url, headers=headers, json=body, timeout=120)
+                if resp.status_code == 429:
+                    wait = min(2 ** (attempt + 1), 30)
+                    print(f"Rate limited, waiting {wait}s (attempt {attempt})...")
+                    time.sleep(wait)
+                    continue
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
                 return content
+            except requests.exceptions.HTTPError as e:
+                if "429" in str(e) and attempt < self.max_retries:
+                    wait = min(2 ** (attempt + 1), 30)
+                    print(f"Rate limited, waiting {wait}s...")
+                    time.sleep(wait)
+                    continue
+                if attempt < self.max_retries:
+                    wait = 2 ** attempt
+                    print(f"API error (attempt {attempt}/{self.max_retries}): {e}, retrying in {wait}s...")
+                    time.sleep(wait)
+                else:
+                    print(f"API error (final attempt): {e}")
+                    return ""
             except Exception as e:
                 if attempt < self.max_retries:
                     wait = 2 ** attempt
@@ -116,6 +134,7 @@ class APIRubricGenerator:
                 else:
                     print(f"API error (final attempt): {e}")
                     return ""
+        return ""
 
     def generate_rubric(self, question: str) -> str:
         prompt = RUBRIC_GENERATION_PROMPT.format(question=question)
@@ -124,6 +143,8 @@ class APIRubricGenerator:
         result = _clean_output(result)
         if result:
             result = _deduplicate_rubric(result)
+        # Small delay to avoid rate limits
+        time.sleep(0.5)
         return result
 
     def generate_batch(self, questions: List[str], batch_size: int = 8) -> List[str]:
