@@ -69,6 +69,16 @@ DISC_POWER = float(os.environ.get("GRM_DISC_POWER", "2.0"))  # power > 1 amplifi
 # when computing the consensus score.
 SPEARMAN_THRESHOLD = float(os.environ.get("GRM_SPEARMAN_THRESHOLD", "0.8"))
 
+# ── Anti-collapse: criterion length floor ────────────────────────────────
+# Criteria shorter than this (chars) get a per-criterion penalty added to QA.
+CRITERION_MIN_CHARS = int(os.environ.get("GRM_CRITERION_MIN_CHARS", "200"))
+CRITERION_SHORT_PENALTY = float(os.environ.get("GRM_CRITERION_SHORT_PENALTY", "-0.3"))
+
+# ── Anti-collapse: response length soft floor ────────────────────────────
+# Rollouts shorter than this (tokens) get a linear penalty added to QA.
+RESPONSE_MIN_TOKENS = int(os.environ.get("GRM_RESPONSE_MIN_TOKENS", "400"))
+RESPONSE_SHORT_PENALTY = float(os.environ.get("GRM_RESPONSE_SHORT_PENALTY", "-3.0"))
+
 
 def _find_unique_criteria(
     crit_scores: Dict[int, Dict[int, float]],
@@ -511,15 +521,29 @@ class MetaRewardFunction:
                     # ── Consensus: when rollout j evaluates answer i, the
                     # score = mean of unique criteria scores for answer i.
                     # Consensus reward = mean across all other answers.
+                    # Anti-collapse: only include discriminative criteria
+                    # (std >= DISC_STD_FLOOR) in consensus. This prevents
+                    # tautological criteria from inflating consensus scores.
                     answer_keys_for_j = set()
                     for k_data in j_crit.values():
                         answer_keys_for_j.update(k_data.keys())
                     other_answer_keys = sorted(answer_keys_for_j)
 
+                    # Pre-compute which unique criteria are discriminative
+                    discriminative_reps = set()
+                    for uk in unique_reps:
+                        score_list = list(j_crit.get(uk, {}).values())
+                        if len(score_list) >= 2:
+                            std_k = float(np.std(score_list))
+                            if std_k >= DISC_STD_FLOOR:
+                                discriminative_reps.add(uk)
+                    # Fall back to all criteria if none are discriminative
+                    consensus_reps = discriminative_reps if discriminative_reps else set(unique_reps)
+
                     consensus_per_answer = []
                     for ai in other_answer_keys:
                         crit_vals = []
-                        for uk in unique_reps:
+                        for uk in consensus_reps:
                             s = j_crit.get(uk, {}).get(ai)
                             if s is not None:
                                 crit_vals.append(s)
@@ -568,6 +592,22 @@ class MetaRewardFunction:
 
                     # ── Final reward for rollout j ────────────────────────
                     qa = float(quality_adjustments[indices[j]]) if RUBRIC_QUALITY_CONFIG.enabled else 0.0
+
+                    # Anti-collapse: criterion length floor penalty
+                    n_short_crit = 0
+                    for ct in crit_texts:
+                        if len(ct) < CRITERION_MIN_CHARS:
+                            n_short_crit += 1
+                    crit_len_penalty = n_short_crit * CRITERION_SHORT_PENALTY
+
+                    # Anti-collapse: response length soft floor penalty
+                    resp_len_penalty = 0.0
+                    tc_j = response_token_counts[indices[j]] if response_token_counts else 0
+                    if tc_j > 0 and tc_j < RESPONSE_MIN_TOKENS:
+                        # Linear ramp: full penalty at 0 tokens, zero at RESPONSE_MIN_TOKENS
+                        resp_len_penalty = RESPONSE_SHORT_PENALTY * (1.0 - tc_j / RESPONSE_MIN_TOKENS)
+
+                    qa += crit_len_penalty + resp_len_penalty
                     rewards[indices[j]] = consensus + disc_reward + qa
                     # GDPO: store per-component rewards for decoupled normalization
                     self._component_rewards[indices[j]] = (consensus, disc_reward, qa)
@@ -575,9 +615,13 @@ class MetaRewardFunction:
                     rollout_details[j] = {
                         "n_total": n_total_crit,
                         "n_unique": n_unique,
+                        "n_discriminative": len(discriminative_reps),
+                        "n_short_crit": n_short_crit,
                         "consensus": consensus,
                         "disc": disc_reward,
                         "qa": qa,
+                        "crit_len_penalty": crit_len_penalty,
+                        "resp_len_penalty": resp_len_penalty,
                         "reward": rewards[indices[j]].item(),
                         "criteria": crit_detail,
                         "clusters": {str(rep): members for rep, members in clusters.items()},
