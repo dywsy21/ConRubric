@@ -824,6 +824,10 @@ class MetaRewardFunction:
                             "qa": round(detail.get("qa", 0), 4),
                             "n_criteria_total": detail.get("n_total", 0),
                             "n_criteria_unique": detail.get("n_unique", 0),
+                            "n_discriminative": detail.get("n_discriminative", 0),
+                            "n_short_crit": detail.get("n_short_crit", 0),
+                            "crit_len_penalty": round(detail.get("crit_len_penalty", 0), 4),
+                            "resp_len_penalty": round(detail.get("resp_len_penalty", 0), 4),
                             "criteria": detail.get("criteria", []),
                             "clusters": detail.get("clusters", {}),
                         })
