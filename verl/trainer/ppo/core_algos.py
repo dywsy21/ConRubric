@@ -332,8 +332,8 @@ def compute_grpo_outcome_advantage(
 # disc (discrimination) is secondary, qa (quality/formatting) is regularization.
 GDPO_COMPONENT_WEIGHTS = {
     "reward_consensus": 1.0,
-    "reward_disc": 1.0,
-    "reward_qa": 0.1,
+    "reward_disc": 2.0,
+    "reward_qa": 0.5,
 }
 
 
