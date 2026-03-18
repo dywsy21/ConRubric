@@ -135,7 +135,7 @@ algorithm:
 trainer:
   project_name: grm-dapo
   experiment_name: consensus_dapo
-  logger: ['console', 'wandb']
+  logger: ['console']
   nnodes: 1
   n_gpus_per_node: 1   # GPU 0 for actor+rollout; GPU 1 reserved for solver/oracle vLLM
   total_epochs: 1
