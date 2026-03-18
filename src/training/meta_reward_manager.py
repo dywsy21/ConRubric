@@ -68,6 +68,16 @@ class MetaConsensusRewardManager(AbstractRewardManager):
                 return str(gt.get("gold_rubric", "")).strip()
         return ""
 
+    @staticmethod
+    def _extract_gold_answer(data_item) -> str:
+        """Extract gold_answer (ideal_completion) from reward_model.ground_truth."""
+        reward_model = data_item.non_tensor_batch.get("reward_model", {})
+        if isinstance(reward_model, dict):
+            gt = reward_model.get("ground_truth")
+            if isinstance(gt, dict):
+                return str(gt.get("gold_answer", "")).strip()
+        return ""
+
     def __call__(self, data: DataProto, return_dict: bool = False):
         reward_from_rm_scores = self._extract_reward_from_rm_scores(data, return_dict)
         if reward_from_rm_scores is not None:
@@ -86,6 +96,7 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         rubrics: list[str] = []
         valid_response_lengths: list[int] = []
         gold_rubrics: list[str] = []
+        gold_answers: list[str] = []
 
         for i in range(batch_size):
             item = data[i]
@@ -114,11 +125,12 @@ class MetaConsensusRewardManager(AbstractRewardManager):
             rubrics.append(response_str)
             valid_response_lengths.append(max(valid_response_len, 1))
             gold_rubrics.append(self._extract_gold_rubric(item))
+            gold_answers.append(self._extract_gold_answer(item))
 
         # ── Fast validation path (no Solver/Oracle API calls) ─────────
         if is_validate:
             return self._validate_fast(
-                questions, rubrics, gold_rubrics, valid_response_lengths,
+                questions, rubrics, gold_rubrics, gold_answers, valid_response_lengths,
                 rewards, batch_size, return_dict,
             )
 
@@ -137,6 +149,7 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         scalar_rewards = self.reward_fn.compute_reward(
             questions, rubrics,
             gold_rubrics=gold_rubrics,
+            gold_answers=gold_answers,
             global_step=global_step,
             response_token_counts=valid_response_lengths,
         )
@@ -197,6 +210,7 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         questions: list[str],
         rubrics: list[str],
         gold_rubrics: list[str],
+        gold_answers: list[str],
         valid_response_lengths: list[int],
         rewards: torch.Tensor,
         batch_size: int,
@@ -279,9 +293,109 @@ class MetaConsensusRewardManager(AbstractRewardManager):
               f"mean_n_criteria={np.mean(reward_extra_info['val_n_criteria']):.1f}, "
               f"mean_format={np.mean(reward_extra_info['val_format_compliance']):.3f}")
 
+        # ── Oracle-based rubric quality metrics (small subset) ─────────
+        oracle_metrics = self._validate_oracle_subset(
+            questions, rubrics, gold_answers, batch_size,
+        )
+        if oracle_metrics:
+            for key, values in oracle_metrics.items():
+                reward_extra_info[key] = values
+
         if return_dict:
             return {"reward_tensor": rewards, "reward_extra_info": dict(reward_extra_info)}
         return rewards
+
+    # ── Oracle-based validation metrics ─────────────────────────────────
+
+    VAL_ORACLE_SUBSET = 10  # number of prompts to evaluate with Oracle
+
+    def _validate_oracle_subset(
+        self,
+        questions: list[str],
+        rubrics: list[str],
+        gold_answers: list[str],
+        batch_size: int,
+    ) -> dict[str, list[float]]:
+        """Score gold answer + mismatched answer against generated rubrics using Oracle.
+
+        Uses a small subset of prompts with available gold answers.
+        For each, scores the gold answer and a mismatched answer (from another question)
+        to measure the rubric's discriminative power.
+
+        Returns dict of metric_name -> list of batch_size values (padded with 0 for non-evaluated).
+        """
+        # Collect indices with both a non-empty rubric and gold answer
+        eligible = [
+            i for i in range(batch_size)
+            if i < len(gold_answers) and gold_answers[i].strip()
+            and rubrics[i].strip()
+        ]
+        if len(eligible) < 2:
+            print("[ValReward] Oracle subset: <2 eligible prompts, skipping")
+            return {}
+
+        rng = np.random.default_rng(seed=42)
+        subset = list(rng.choice(eligible, size=min(self.VAL_ORACLE_SUBSET, len(eligible)), replace=False))
+
+        oracle = self.reward_fn.oracle
+        gold_scores = [0.0] * batch_size
+        mismatch_scores = [0.0] * batch_size
+        top1_hits = [0.0] * batch_size
+        resolutions = [0.0] * batch_size
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _score_pair(idx: int) -> tuple[int, float, float]:
+            """Score gold answer and mismatched answer for prompt idx."""
+            q = questions[idx]
+            rubric = rubrics[idx]
+            gold_ans = gold_answers[idx]
+
+            # Pick a mismatched answer: gold answer from a different eligible prompt
+            others = [j for j in eligible if j != idx and gold_answers[j].strip()]
+            if not others:
+                return idx, 0.0, 0.0
+            mismatch_idx = others[rng.integers(len(others))]
+            mismatch_ans = gold_answers[mismatch_idx]
+
+            try:
+                scores = oracle.evaluate_answers_by_rubric(q, [gold_ans, mismatch_ans], rubric)
+                return idx, scores[0], scores[1]
+            except Exception as e:
+                print(f"[ValReward] Oracle error for prompt {idx}: {e}")
+                return idx, 0.0, 0.0
+
+        n_workers = min(len(subset), 4)
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            futures = {pool.submit(_score_pair, idx): idx for idx in subset}
+            for fut in as_completed(futures):
+                idx, gs, ms = fut.result()
+                gold_scores[idx] = gs
+                mismatch_scores[idx] = ms
+                top1_hits[idx] = 1.0 if gs > ms else 0.0
+                resolutions[idx] = gs - ms
+
+        # Compute aggregate stats for the subset only
+        subset_gold = [gold_scores[i] for i in subset]
+        subset_top1 = [top1_hits[i] for i in subset]
+        subset_res = [resolutions[i] for i in subset]
+
+        mean_top1 = float(np.mean(subset_top1))
+        mean_res = float(np.mean(subset_res))
+        mean_gold = float(np.mean(subset_gold))
+
+        print(f"[ValReward] Oracle subset ({len(subset)} prompts): "
+              f"top1_acc={mean_top1:.3f}, "
+              f"resolution={mean_res:.2f}, "
+              f"gold_score={mean_gold:.2f}")
+
+        # Broadcast aggregate values to all samples so process_validation_metrics
+        # computes the correct mean (each uid sees the same aggregate value).
+        return {
+            "val_oracle_top1_acc": [mean_top1] * batch_size,
+            "val_oracle_resolution": [mean_res] * batch_size,
+            "val_oracle_gold_score": [mean_gold] * batch_size,
+        }
 
     # ── Token-level duplication penalty ────────────────────────────────
 

@@ -104,10 +104,15 @@ def ensure_healthbench_splits(
                 if not question or not rubrics:
                     continue
 
+                # Extract ideal_completion from ideal_completions_data
+                icd = item.get("ideal_completions_data") or {}
+                ideal_completion = (icd.get("ideal_completion") or "").strip() if isinstance(icd, dict) else ""
+
                 row = {
                     "prompt_id": prompt_id,
                     "question": question,
                     "rubrics": rubrics,
+                    "ideal_completion": ideal_completion,
                     "source": f"healthbench:{file_name}",
                 }
 

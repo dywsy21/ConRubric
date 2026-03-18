@@ -261,6 +261,7 @@ class MetaRewardFunction:
 
     def compute_reward(self, questions: List[str], rubrics: List[str],
                        gold_rubrics: Optional[List[str]] = None,
+                       gold_answers: Optional[List[str]] = None,
                        solver_workers: int = None,
                        oracle_workers: int = None,
                        global_step: int = None,
@@ -308,6 +309,7 @@ class MetaRewardFunction:
         # ── Group by question ──────────────────────────────────────────
         q_to_rubrics: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
         q_to_gold_rubric: Dict[str, str] = {}  # question -> gold rubric text
+        q_to_gold_answer: Dict[str, str] = {}  # question -> ideal_completion (gold answer)
         for idx, (q, r) in enumerate(zip(questions, rubrics)):
             # Strip <think>...</think> blocks (instruct/thinking models)
             r_clean = _THINK_BLOCK_RE.sub('', r)
@@ -319,11 +321,17 @@ class MetaRewardFunction:
                 gr = gold_rubrics[idx].strip()
                 if gr and q not in q_to_gold_rubric:
                     q_to_gold_rubric[q] = gr
+            # Associate gold answer with question
+            if gold_answers and idx < len(gold_answers):
+                ga = gold_answers[idx].strip()
+                if ga and q not in q_to_gold_answer:
+                    q_to_gold_answer[q] = ga
 
         q_items = list(q_to_rubrics.items())
         n_with_gold = sum(1 for q, _ in q_items if q in q_to_gold_rubric)
+        n_with_gold_ans = sum(1 for q, _ in q_items if q in q_to_gold_answer)
         print(f"[MetaReward] Processing {len(q_items)} unique questions "
-              f"({n_with_gold} with gold rubric)")
+              f"({n_with_gold} with gold rubric, {n_with_gold_ans} with gold answer)")
 
         rewards = torch.zeros(len(questions), dtype=torch.float32)
         self._dup_criterion_weights = {}  # reset per batch
@@ -403,9 +411,10 @@ class MetaRewardFunction:
             solver_answer_indices[q_idx] = selected
 
             n_solver_tasks = len(selected)
-            # Submit gold rubric solver task if available
+            # Submit gold rubric solver task only if no pre-computed gold answer
             gold_rubric_text = q_to_gold_rubric.get(q)
-            if gold_rubric_text:
+            precomputed_gold = q_to_gold_answer.get(q)
+            if gold_rubric_text and not precomputed_gold:
                 gold_solver_futures[q_idx] = solver_pool.submit(_gen_answer, q, gold_rubric_text)
                 n_solver_tasks += 1
 
@@ -444,9 +453,13 @@ class MetaRewardFunction:
                     print(f"[MetaReward] Solver error Q{q_idx} rubric {local_i}: {e}")
                     answers[local_i] = ""
 
-            # Collect gold answer if available
+            # Collect gold answer: prefer precomputed ideal_completion, fall back to gold solver
             gold_ans = None
-            if q_idx in gold_solver_futures:
+            precomputed_gold = q_to_gold_answer.get(q)
+            if precomputed_gold:
+                gold_ans = precomputed_gold
+                gold_answers[q_idx] = gold_ans
+            elif q_idx in gold_solver_futures:
                 try:
                     gold_ans = gold_solver_futures[q_idx].result(timeout=900)
                     gold_answers[q_idx] = gold_ans

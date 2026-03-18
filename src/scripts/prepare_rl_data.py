@@ -130,7 +130,7 @@ def _load_healthbench(limit: int | None = None) -> list[dict]:
                     question=question,
                     rubric_items=rubric_items,
                     source=item.get("source", "healthbench"),
-                    gold_answer="",
+                    gold_answer=item.get("ideal_completion", ""),
                 )
             )
             if limit is not None and len(rows) >= limit:
@@ -205,6 +205,7 @@ def _prepare_val_parquet(
                     question=question,
                     rubric_items=rubric_list,
                     source="healthbench_val",
+                    gold_answer=item.get("ideal_completion", ""),
                 )
             )
 
