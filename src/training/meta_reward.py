@@ -79,6 +79,17 @@ CRITERION_SHORT_PENALTY = float(os.environ.get("GRM_CRITERION_SHORT_PENALTY", "-
 RESPONSE_MIN_TOKENS = int(os.environ.get("GRM_RESPONSE_MIN_TOKENS", "400"))
 RESPONSE_SHORT_PENALTY = float(os.environ.get("GRM_RESPONSE_SHORT_PENALTY", "-3.0"))
 
+# ── Gold-disc: reward rubrics that score gold rubric's answer higher ─────
+# Enable/disable gold-disc reward component.
+GOLD_DISC_ENABLED = os.environ.get("GRM_GOLD_DISC_ENABLED", "false").lower() == "true"
+# Scale factor for gold_disc component (applied before GDPO normalization).
+GOLD_DISC_SCALE = float(os.environ.get("GRM_GOLD_DISC_SCALE", "1.0"))
+
+# ── Calibration: penalise rubrics that produce binary (0/10) scores ──────
+# Binary ratio above this floor triggers a linear penalty.
+BINARY_RATIO_FLOOR = float(os.environ.get("GRM_BINARY_RATIO_FLOOR", "0.3"))
+BINARY_PENALTY_SCALE = float(os.environ.get("GRM_BINARY_PENALTY_SCALE", "3.0"))
+
 
 def _find_unique_criteria(
     crit_scores: Dict[int, Dict[int, float]],
@@ -249,6 +260,7 @@ class MetaRewardFunction:
         )
 
     def compute_reward(self, questions: List[str], rubrics: List[str],
+                       gold_rubrics: Optional[List[str]] = None,
                        solver_workers: int = None,
                        oracle_workers: int = None,
                        global_step: int = None,
@@ -289,24 +301,34 @@ class MetaRewardFunction:
               f"solver_n={solver_n or 'all'}, "
               f"disc_scale={DISC_SCALE}, disc_std_floor={DISC_STD_FLOOR}, "
               f"disc_power={DISC_POWER}, spearman_threshold={SPEARMAN_THRESHOLD}, "
-              f"rubric_quality={RUBRIC_QUALITY_CONFIG.enabled}")
+              f"rubric_quality={RUBRIC_QUALITY_CONFIG.enabled}, "
+              f"gold_disc={GOLD_DISC_ENABLED}, gold_disc_scale={GOLD_DISC_SCALE}, "
+              f"binary_penalty_scale={BINARY_PENALTY_SCALE}, binary_ratio_floor={BINARY_RATIO_FLOOR}")
 
         # ── Group by question ──────────────────────────────────────────
         q_to_rubrics: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
+        q_to_gold_rubric: Dict[str, str] = {}  # question -> gold rubric text
         for idx, (q, r) in enumerate(zip(questions, rubrics)):
             # Strip <think>...</think> blocks (instruct/thinking models)
             r_clean = _THINK_BLOCK_RE.sub('', r)
             # Strip legacy "| tags: ..." suffixes from generated rubric text
             r_clean = _TAGS_SUFFIX_RE.sub('', r_clean)
             q_to_rubrics[q].append((idx, r_clean))
+            # Associate gold rubric with question (same for all rollouts of the question)
+            if GOLD_DISC_ENABLED and gold_rubrics and idx < len(gold_rubrics):
+                gr = gold_rubrics[idx].strip()
+                if gr and q not in q_to_gold_rubric:
+                    q_to_gold_rubric[q] = gr
 
         q_items = list(q_to_rubrics.items())
-        print(f"[MetaReward] Processing {len(q_items)} unique questions")
+        n_with_gold = sum(1 for q, _ in q_items if q in q_to_gold_rubric)
+        print(f"[MetaReward] Processing {len(q_items)} unique questions "
+              f"({n_with_gold} with gold rubric)")
 
         rewards = torch.zeros(len(questions), dtype=torch.float32)
         self._dup_criterion_weights = {}  # reset per batch
         # GDPO: per-component rewards for decoupled normalization
-        self._component_rewards: Dict[int, Tuple[float, float, float, float]] = {}  # idx -> (consensus, disc, qa, div)
+        self._component_rewards: Dict[int, Tuple[float, float, float, float, float]] = {}  # idx -> (consensus, disc, qa, gold_disc, calibration)
 
         # ── Pre-compute rubric quality adjustments ─────────────────────
         quality_adjustments = np.zeros(len(questions), dtype=np.float32)
@@ -369,6 +391,8 @@ class MetaRewardFunction:
         # ── Phase 1: Submit solver tasks ───────────────────────────────
         solver_futures: Dict[int, List[Tuple[int, Future]]] = {}
         solver_answer_indices: Dict[int, List[int]] = {}
+        # Gold rubric solver futures: q_idx -> Future (one per question)
+        gold_solver_futures: Dict[int, Future] = {}
 
         for q_idx, (q, items) in enumerate(q_items):
             n = len(items)
@@ -378,8 +402,15 @@ class MetaRewardFunction:
                 selected = list(range(n))
             solver_answer_indices[q_idx] = selected
 
+            n_solver_tasks = len(selected)
+            # Submit gold rubric solver task if available
+            gold_rubric_text = q_to_gold_rubric.get(q)
+            if gold_rubric_text:
+                gold_solver_futures[q_idx] = solver_pool.submit(_gen_answer, q, gold_rubric_text)
+                n_solver_tasks += 1
+
             with progress_lock:
-                progress["solver_total"] += len(selected)
+                progress["solver_total"] += n_solver_tasks
 
             futs = []
             for local_i in selected:
@@ -397,6 +428,11 @@ class MetaRewardFunction:
         coordinator_futures: List[Future] = []
         coordinator_pool = ThreadPoolExecutor(max_workers=len(q_items))
 
+        # Gold answer storage: q_idx -> answer text (from gold rubric solver)
+        gold_answers: Dict[int, str] = {}
+        # Gold answer index within the answer pool: q_idx -> int
+        gold_answer_indices: Dict[int, int] = {}
+
         def _coordinate_question(q_idx: int, q: str, items: List[Tuple[int, str]], n: int):
             """Wait for solver results, then submit per-criterion oracle evals."""
             # Collect answers
@@ -407,6 +443,15 @@ class MetaRewardFunction:
                 except Exception as e:
                     print(f"[MetaReward] Solver error Q{q_idx} rubric {local_i}: {e}")
                     answers[local_i] = ""
+
+            # Collect gold answer if available
+            gold_ans = None
+            if q_idx in gold_solver_futures:
+                try:
+                    gold_ans = gold_solver_futures[q_idx].result(timeout=900)
+                    gold_answers[q_idx] = gold_ans
+                except Exception as e:
+                    print(f"[MetaReward] Gold solver error Q{q_idx}: {e}")
 
             # Store answers for logging
             question_answers[q_idx] = dict(answers)
@@ -421,6 +466,15 @@ class MetaRewardFunction:
                 eval_futures[q_idx] = []
                 return
 
+            # Add gold answer to the pool with a special index (n = beyond rollout indices)
+            gold_idx = None
+            if gold_ans is not None:
+                gold_idx = n  # index beyond the rollout indices 0..n-1
+                answers[gold_idx] = gold_ans
+                gold_answer_indices[q_idx] = gold_idx
+
+            all_answer_keys = sorted(answers.keys())
+
             # Parse each rollout's rubric into individual criteria,
             # then submit one oracle call per criterion
             total_evals = 0
@@ -433,16 +487,13 @@ class MetaRewardFunction:
                 if criteria:
                     criterion_texts = [f"- [{c.sign}] {c.text}" for c in criteria]
                 else:
-                    # NO FALLBACK: if no valid criteria parsed, skip oracle evals.
-                    # The reward for this rollout will be quality_adjustment only
-                    # (which is strongly negative due to 0-criteria penalty).
                     criterion_texts = []
                 rollout_criterion_texts[q_idx][j] = criterion_texts
 
-                # Other answers (exclude answer j)
-                other_keys = [ai for ai in answer_keys if ai != j]
+                # Other answers (exclude rollout j's own answer, include gold)
+                other_keys = [ai for ai in all_answer_keys if ai != j]
                 if not other_keys:
-                    other_keys = answer_keys[:]
+                    other_keys = all_answer_keys[:]
                 other_answers = [answers[ai] for ai in other_keys]
 
                 for k, crit_text in enumerate(criterion_texts):
@@ -475,7 +526,7 @@ class MetaRewardFunction:
                 # Single rollout: quality adjustment only (no cross-evaluation)
                 qa = float(quality_adjustments[indices[0]]) if RUBRIC_QUALITY_CONFIG.enabled else 0.0
                 rewards[indices[0]] = qa
-                self._component_rewards[indices[0]] = (0.0, 0.0, qa, 0.0)
+                self._component_rewards[indices[0]] = (0.0, 0.0, qa, 0.0, 0.0)
                 all_rollout_details[q_idx] = {}
             else:
                 # Build per-criterion score matrix:
@@ -528,11 +579,16 @@ class MetaRewardFunction:
                     for k_data in j_crit.values():
                         answer_keys_for_j.update(k_data.keys())
                     other_answer_keys = sorted(answer_keys_for_j)
+                    # Exclude gold answer from consensus/disc (used only for gold_disc)
+                    gold_idx = gold_answer_indices.get(q_idx)
+                    solver_answer_keys = [ai for ai in other_answer_keys if ai != gold_idx]
 
                     # Pre-compute which unique criteria are discriminative
                     discriminative_reps = set()
                     for uk in unique_reps:
-                        score_list = list(j_crit.get(uk, {}).values())
+                        # Use only solver answers for std computation (exclude gold)
+                        score_list = [j_crit.get(uk, {}).get(ai) for ai in solver_answer_keys]
+                        score_list = [s for s in score_list if s is not None]
                         if len(score_list) >= 2:
                             std_k = float(np.std(score_list))
                             if std_k >= DISC_STD_FLOOR:
@@ -541,7 +597,7 @@ class MetaRewardFunction:
                     consensus_reps = discriminative_reps if discriminative_reps else set(unique_reps)
 
                     consensus_per_answer = []
-                    for ai in other_answer_keys:
+                    for ai in solver_answer_keys:
                         crit_vals = []
                         for uk in consensus_reps:
                             s = j_crit.get(uk, {}).get(ai)
@@ -559,7 +615,9 @@ class MetaRewardFunction:
                     disc_values = []
                     n_discriminative = 0
                     for uk in unique_reps:
-                        score_list = list(j_crit.get(uk, {}).values())
+                        # Use only solver answers for disc (exclude gold)
+                        score_list = [j_crit.get(uk, {}).get(ai) for ai in solver_answer_keys]
+                        score_list = [s for s in score_list if s is not None]
                         if len(score_list) >= 2:
                             std_k = float(np.std(score_list))
                             if std_k < DISC_STD_FLOOR:
@@ -608,9 +666,39 @@ class MetaRewardFunction:
                         resp_len_penalty = RESPONSE_SHORT_PENALTY * (1.0 - tc_j / RESPONSE_MIN_TOKENS)
 
                     qa += crit_len_penalty + resp_len_penalty
-                    rewards[indices[j]] = consensus + disc_reward + qa
+
+                    # ── Gold-disc: how well rubric_j scores gold answer vs solver answers ──
+                    gold_disc = 0.0
+                    gold_idx = gold_answer_indices.get(q_idx)
+                    if gold_idx is not None and GOLD_DISC_ENABLED:
+                        gold_disc_per_crit = []
+                        for uk in unique_reps:
+                            gold_s = j_crit.get(uk, {}).get(gold_idx)
+                            solver_scores = [
+                                j_crit.get(uk, {}).get(ai)
+                                for ai in solver_answer_keys
+                            ]
+                            solver_scores = [s for s in solver_scores if s is not None]
+                            if gold_s is not None and solver_scores:
+                                gold_disc_per_crit.append(gold_s - float(np.mean(solver_scores)))
+                        if gold_disc_per_crit:
+                            gold_disc = float(np.mean(gold_disc_per_crit)) * GOLD_DISC_SCALE
+
+                    # ── Calibration penalty: penalise binary (0/10) score distributions ──
+                    calibration_penalty = 0.0
+                    all_eval_scores = []
+                    for uk in unique_reps:
+                        all_eval_scores.extend(j_crit.get(uk, {}).values())
+                    if all_eval_scores:
+                        binary_count = sum(1 for s in all_eval_scores if s <= 0.5 or s >= 9.5)
+                        binary_ratio = binary_count / len(all_eval_scores)
+                        excess = binary_ratio - BINARY_RATIO_FLOOR
+                        if excess > 0:
+                            calibration_penalty = -BINARY_PENALTY_SCALE * excess
+
+                    rewards[indices[j]] = consensus + disc_reward + qa + gold_disc + calibration_penalty
                     # GDPO: store per-component rewards for decoupled normalization
-                    self._component_rewards[indices[j]] = (consensus, disc_reward, qa)
+                    self._component_rewards[indices[j]] = (consensus, disc_reward, qa, gold_disc, calibration_penalty)
 
                     rollout_details[j] = {
                         "n_total": n_total_crit,
@@ -620,6 +708,9 @@ class MetaRewardFunction:
                         "consensus": consensus,
                         "disc": disc_reward,
                         "qa": qa,
+                        "gold_disc": gold_disc,
+                        "calibration": calibration_penalty,
+                        "binary_ratio": binary_ratio if all_eval_scores else 0.0,
                         "crit_len_penalty": crit_len_penalty,
                         "resp_len_penalty": resp_len_penalty,
                         "reward": rewards[indices[j]].item(),
@@ -634,18 +725,26 @@ class MetaRewardFunction:
                 g_cons = [rollout_details[j].get("consensus", 0.0) for j in range(n)]
                 g_disc = [rollout_details[j].get("disc", 0.0) for j in range(n)]
                 g_qa = [rollout_details[j].get("qa", 0.0) for j in range(n)]
+                g_gold = [rollout_details[j].get("gold_disc", 0.0) for j in range(n)]
+                g_cal = [rollout_details[j].get("calibration", 0.0) for j in range(n)]
                 n_cons = self._gdpo_normalize_group(g_cons, weight=w["consensus"])
                 n_disc = self._gdpo_normalize_group(g_disc, weight=w["disc"])
                 n_qa = self._gdpo_normalize_group(g_qa, weight=w["qa"])
+                n_gold = self._gdpo_normalize_group(g_gold, weight=w["gold_disc"])
+                n_cal = self._gdpo_normalize_group(g_cal, weight=w["calibration"])
+                gold_rubric_avail = q_to_gold_rubric.get(q, "") != ""
                 for j in range(n):
                     rd = rollout_details[j]
-                    gdpo_adv = n_cons[j] + n_disc[j] + n_qa[j]
+                    gdpo_adv = n_cons[j] + n_disc[j] + n_qa[j] + n_gold[j] + n_cal[j]
+                    gold_str = f"gold_disc={rd.get('gold_disc', 0):.2f}(×{w['gold_disc']:.1f}→{n_gold[j]:+.3f})  " if gold_rubric_avail else ""
+                    cal_str = f"cal={rd.get('calibration', 0):.2f}(bin={rd.get('binary_ratio', 0):.0%})(×{w['calibration']:.1f}→{n_cal[j]:+.3f})"
                     print(f"[MetaReward]   Q{q_idx} R{j}: {rd['n_total']} criteria → "
                           f"{rd['n_unique']} unique, reward={rd['reward']:.2f}  "
                           f"gdpo={gdpo_adv:+.3f}  "
                           f"cons={rd['consensus']:.2f}(×{w['consensus']:.1f}→{n_cons[j]:+.3f})  "
                           f"disc={rd['disc']:.2f}(×{w['disc']:.1f}→{n_disc[j]:+.3f})  "
-                          f"qa={rd['qa']:.2f}(×{w['qa']:.1f}→{n_qa[j]:+.3f})")
+                          f"qa={rd['qa']:.2f}(×{w['qa']:.1f}→{n_qa[j]:+.3f})  "
+                          f"{gold_str}{cal_str}")
 
             with progress_lock:
                 progress["q_done"] += 1
@@ -676,7 +775,7 @@ class MetaRewardFunction:
         return rewards
 
     # GDPO per-component weights (must match core_algos.GDPO_COMPONENT_WEIGHTS)
-    GDPO_WEIGHTS = {"consensus": 1.0, "disc": 2.0, "qa": 0.5}
+    GDPO_WEIGHTS = {"consensus": 1.0, "disc": 1.0, "qa": 0.5, "gold_disc": 2.0, "calibration": 0.5}
 
     @staticmethod
     def _gdpo_normalize_group(values: List[float], weight: float = 1.0, epsilon: float = 1e-6) -> List[float]:
@@ -715,16 +814,22 @@ class MetaRewardFunction:
             group_cons = [details.get(j, {}).get("consensus", 0.0) for j in range(len(items))]
             group_disc = [details.get(j, {}).get("disc", 0.0) for j in range(len(items))]
             group_qa = [details.get(j, {}).get("qa", 0.0) for j in range(len(items))]
+            group_gold = [details.get(j, {}).get("gold_disc", 0.0) for j in range(len(items))]
+            group_cal = [details.get(j, {}).get("calibration", 0.0) for j in range(len(items))]
             w = self.GDPO_WEIGHTS
             norm_cons = self._gdpo_normalize_group(group_cons, weight=w["consensus"])
             norm_disc = self._gdpo_normalize_group(group_disc, weight=w["disc"])
             norm_qa = self._gdpo_normalize_group(group_qa, weight=w["qa"])
+            norm_gold = self._gdpo_normalize_group(group_gold, weight=w["gold_disc"])
+            norm_cal = self._gdpo_normalize_group(group_cal, weight=w["calibration"])
 
             print(f"\n[Q{q_idx+1}] {q}")
-            print(f"  ({len(items)} rollouts)  GDPO weights: cons={w['consensus']:.1f}, disc={w['disc']:.1f}, qa={w['qa']:.1f}")
+            print(f"  ({len(items)} rollouts)  GDPO weights: cons={w['consensus']:.1f}, disc={w['disc']:.1f}, qa={w['qa']:.1f}, gold={w['gold_disc']:.1f}, cal={w['calibration']:.1f}")
             print(f"  Group stats: consensus μ={np.mean(group_cons):.2f} σ={np.std(group_cons):.2f}, "
                   f"disc μ={np.mean(group_disc):.2f} σ={np.std(group_disc):.2f}, "
-                  f"qa μ={np.mean(group_qa):.2f} σ={np.std(group_qa):.2f}")
+                  f"qa μ={np.mean(group_qa):.2f} σ={np.std(group_qa):.2f}, "
+                  f"gold_disc μ={np.mean(group_gold):.2f} σ={np.std(group_gold):.2f}, "
+                  f"cal μ={np.mean(group_cal):.2f} σ={np.std(group_cal):.2f}")
 
             for local_i, (global_idx, rubric) in enumerate(items):
                 r = rewards[global_idx].item()
@@ -732,7 +837,9 @@ class MetaRewardFunction:
                 cons_raw = detail.get('consensus', 0.0)
                 disc_raw = detail.get('disc', 0.0)
                 qa_raw = detail.get('qa', 0.0)
-                gdpo_adv = norm_cons[local_i] + norm_disc[local_i] + norm_qa[local_i]
+                gold_raw = detail.get('gold_disc', 0.0)
+                cal_raw = detail.get('calibration', 0.0)
+                gdpo_adv = norm_cons[local_i] + norm_disc[local_i] + norm_qa[local_i] + norm_gold[local_i] + norm_cal[local_i]
 
                 print(f"\n  {'─'*70}")
                 print(f"  Rubric {local_i+1}  reward={r:.3f}  "
@@ -740,6 +847,8 @@ class MetaRewardFunction:
                 print(f"    cons={cons_raw:.2f}(×{w['consensus']:.1f}→{norm_cons[local_i]:+.3f})  |  "
                       f"disc={disc_raw:.2f}(×{w['disc']:.1f}→{norm_disc[local_i]:+.3f})  |  "
                       f"qa={qa_raw:.2f}(×{w['qa']:.1f}→{norm_qa[local_i]:+.3f})")
+                print(f"    gold_disc={gold_raw:.2f}(×{w['gold_disc']:.1f}→{norm_gold[local_i]:+.3f})  |  "
+                      f"cal={cal_raw:.2f}(bin={detail.get('binary_ratio', 0):.0%})(×{w['calibration']:.1f}→{norm_cal[local_i]:+.3f})")
                 print(f"  Criteria: {detail.get('n_total', '?')} total → "
                       f"{detail.get('n_unique', '?')} unique")
 
@@ -767,16 +876,22 @@ class MetaRewardFunction:
                 g_cons = [details.get(j, {}).get("consensus", 0.0) for j in range(n)]
                 g_disc = [details.get(j, {}).get("disc", 0.0) for j in range(n)]
                 g_qa = [details.get(j, {}).get("qa", 0.0) for j in range(n)]
+                g_gold = [details.get(j, {}).get("gold_disc", 0.0) for j in range(n)]
+                g_cal = [details.get(j, {}).get("calibration", 0.0) for j in range(n)]
                 n_cons = self._gdpo_normalize_group(g_cons, weight=self.GDPO_WEIGHTS["consensus"])
                 n_disc = self._gdpo_normalize_group(g_disc, weight=self.GDPO_WEIGHTS["disc"])
                 n_qa = self._gdpo_normalize_group(g_qa, weight=self.GDPO_WEIGHTS["qa"])
-                gdpo_advs = [n_cons[j] + n_disc[j] + n_qa[j] for j in range(n)]
+                n_gold = self._gdpo_normalize_group(g_gold, weight=self.GDPO_WEIGHTS["gold_disc"])
+                n_cal = self._gdpo_normalize_group(g_cal, weight=self.GDPO_WEIGHTS["calibration"])
+                gdpo_advs = [n_cons[j] + n_disc[j] + n_qa[j] + n_gold[j] + n_cal[j] for j in range(n)]
                 n_unique_list = [details.get(j, {}).get("n_unique", "?") for j in range(n)]
                 rews = [rewards[it[0]].item() for it in items]
+                gold_ds = [f'{details.get(j, {}).get("gold_disc", 0):.1f}' for j in range(n)]
                 print(f"  Q{q_idx+1}: \"{q[:80]}\" | {n} rollouts "
                       f"| reward={[f'{r:.1f}' for r in rews]} "
                       f"| gdpo_adv={[f'{a:+.2f}' for a in gdpo_advs]} "
-                      f"| unique={n_unique_list}")
+                      f"| unique={n_unique_list} "
+                      f"| gold_disc={gold_ds}")
 
         print(f"{'='*80}\n")
 
@@ -822,6 +937,9 @@ class MetaRewardFunction:
                             "consensus": round(detail.get("consensus", 0), 4),
                             "disc": round(detail.get("disc", 0), 4),
                             "qa": round(detail.get("qa", 0), 4),
+                            "gold_disc": round(detail.get("gold_disc", 0), 4),
+                            "calibration": round(detail.get("calibration", 0), 4),
+                            "binary_ratio": round(detail.get("binary_ratio", 0), 4),
                             "n_criteria_total": detail.get("n_total", 0),
                             "n_criteria_unique": detail.get("n_unique", 0),
                             "n_discriminative": detail.get("n_discriminative", 0),

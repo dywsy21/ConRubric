@@ -67,6 +67,7 @@ def _make_row(question: str, rubric_items: list, source: str, gold_answer: str =
             "ground_truth": {
                 "question": question,
                 "gold_answer": gold_answer,
+                "gold_rubric": rubric_text,
             },
         },
         "extra_info": {
@@ -171,6 +172,56 @@ def _load_rubrichub(path: str, limit: int | None = None) -> list[dict]:
 
 
 # ── main ──────────────────────────────────────────────────────────────────
+VAL_OUTPUT_PATH = "data/rl_val_healthbench.parquet"
+
+
+def _prepare_val_parquet(
+    max_prompts: int = 50,
+    seed: int = 42,
+    output_path: str = VAL_OUTPUT_PATH,
+) -> str:
+    """Prepare a small HealthBench validation parquet from benchmark_prompt_pool.
+
+    Uses the benchmark split (20%) which is guaranteed leak-free from SFT/RL train.
+    The gold rubric is stored in ground_truth for keyword coverage evaluation.
+    """
+    split_paths = ensure_healthbench_splits(
+        output_dir="data/healthbench_splits",
+        benchmark_ratio=0.2,
+        seed=seed,
+        force_rebuild=False,
+    )
+
+    rows: list[dict] = []
+    with open(split_paths.benchmark_prompt_pool, "r", encoding="utf-8") as f:
+        for line in f:
+            item = json.loads(line)
+            question = (item.get("question") or "").strip()
+            rubric_list = item.get("rubrics", [])
+            if not question or not rubric_list:
+                continue
+            rows.append(
+                _make_row(
+                    question=question,
+                    rubric_items=rubric_list,
+                    source="healthbench_val",
+                )
+            )
+
+    rng = np.random.default_rng(seed=seed)
+    if max_prompts and len(rows) > max_prompts:
+        indices = rng.choice(len(rows), size=max_prompts, replace=False)
+        rows = [rows[i] for i in sorted(indices)]
+
+    df = pd.DataFrame(rows)
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    df.to_parquet(output_path)
+
+    print(f"[prepare_rl_data] Validation parquet: {len(df)} rows → {output_path}")
+    return output_path
+
+
+# ── main ──────────────────────────────────────────────────────────────────
 def _upsample(rows: list[dict], target_size: int, rng: np.random.Generator) -> list[dict]:
     """Upsample *rows* to *target_size* by repeating + random sampling the remainder."""
     if len(rows) >= target_size:
@@ -188,6 +239,14 @@ def prepare(args: argparse.Namespace) -> None:
     synthetic_path = args.synthetic_path or "data/synthetic_rubrics.jsonl"
     output_path = args.output or OUTPUT_PATH
     rng = np.random.default_rng(seed=args.seed)
+
+    # ── Optionally prepare validation parquet from HealthBench benchmark split ──
+    if getattr(args, "prepare_val", False):
+        _prepare_val_parquet(
+            max_prompts=getattr(args, "val_max_prompts", 50),
+            seed=args.seed,
+        )
+        return
 
     # ── Collect rows from each source ────────────────────────────────
     source_buckets: dict[str, list[dict]] = {}
@@ -251,6 +310,10 @@ def main():
                         help="Upsample smaller sources to match the largest, then shuffle")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for upsampling/shuffling")
     parser.add_argument("--output", type=str, default=OUTPUT_PATH, help=f"Output parquet path (default: {OUTPUT_PATH})")
+    parser.add_argument("--prepare-val", action="store_true",
+                        help="Only prepare the HealthBench validation parquet (fast, no training data)")
+    parser.add_argument("--val-max-prompts", type=int, default=50,
+                        help="Max prompts for validation parquet (default: 50)")
     args = parser.parse_args()
     prepare(args)
 

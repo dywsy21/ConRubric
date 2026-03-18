@@ -330,10 +330,14 @@ def compute_grpo_outcome_advantage(
 
 # GDPO per-component weights: consensus is the primary signal,
 # disc (discrimination) is secondary, qa (quality/formatting) is regularization.
+# gold_disc rewards rubrics that score gold-rubric answers higher than solver answers.
+# calibration penalises rubrics that produce binary (0/10) score distributions.
 GDPO_COMPONENT_WEIGHTS = {
     "reward_consensus": 1.0,
-    "reward_disc": 2.0,
+    "reward_disc": 1.0,
     "reward_qa": 0.5,
+    "reward_gold_disc": 2.0,
+    "reward_calibration": 0.5,
 }
 
 

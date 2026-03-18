@@ -10,7 +10,7 @@ defaults:
 
 data:
   train_files: ['data/rl_train_healthbench.parquet']   # HealthBench-only for faster RL validation
-  val_files: ['data/rl_train_healthbench.parquet']
+  val_files: ['data/rl_val_healthbench.parquet']       # Small benchmark split for fast periodic validation
   prompt_key: prompt
   reward_fn_key: data_source
   max_prompt_length: 2048
@@ -135,14 +135,14 @@ algorithm:
 trainer:
   project_name: grm-dapo
   experiment_name: consensus_dapo
-  logger: ['console']
+  logger: ['console', 'wandb']
   nnodes: 1
   n_gpus_per_node: 1   # GPU 0 for actor+rollout; GPU 1 reserved for solver/oracle vLLM
   total_epochs: 1
   total_training_steps: ${oc.decode:${oc.env:RL_TOTAL_STEPS,1000}}
   save_freq: 20
-  test_freq: 99999
-  val_before_train: False
+  test_freq: 20
+  val_before_train: True
   val_only: False
   resume_mode: auto
   default_local_dir: out/rl

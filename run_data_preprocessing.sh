@@ -161,13 +161,19 @@ echo "[2/3] Done → $SFT_OUT"
 
 # ── Step 3: Prepare RL data ──────────────────────────────────────────────
 echo ""
-echo "[3/3] Preparing RL training parquet (HealthBench + synthetic)..."
+echo "[3/4] Preparing RL training parquet (HealthBench + synthetic)..."
 
 "$PYTHON" -m src.scripts.prepare_rl_data \
   --healthbench-limit "$LIMIT" \
   "${SYNTHETIC_FLAG[@]}" \
   --output "$RL_OUT"
-echo "[3/3] Done → $RL_OUT"
+echo "[3/4] Done → $RL_OUT"
+
+# ── Step 4: Prepare RL validation parquet ────────────────────────────────
+echo ""
+echo "[4/4] Preparing RL validation parquet (HealthBench benchmark split)..."
+"$PYTHON" -m src.scripts.prepare_rl_data --prepare-val --val-max-prompts 50
+echo "[4/4] Done → data/rl_val_healthbench.parquet"
 
 # ── Summary ──────────────────────────────────────────────────────────────
 echo ""
@@ -179,6 +185,7 @@ fi
 echo "  Synthetic : $SYNTHETIC_JSONL"
 echo "  SFT data  : $SFT_OUT"
 echo "  RL data   : $RL_OUT"
+echo "  RL val    : data/rl_val_healthbench.parquet"
 echo ""
 echo " Next steps:"
 echo "  SFT  → ./run_sft.sh"

@@ -4,10 +4,11 @@ import re
 from collections import defaultdict
 from typing import Any, List, Optional
 
+import numpy as np
 import torch
 
 from src.training.meta_reward import MetaRewardFunction
-from src.training.rubric_quality import _CRITERION_RE
+from src.training.rubric_quality import _CRITERION_RE, parse_rubric_text
 from verl import DataProto
 from verl.workers.reward_manager.abstract import AbstractRewardManager
 from verl.workers.reward_manager.registry import REWARD_MANAGER_REGISTRY
@@ -57,10 +58,25 @@ class MetaConsensusRewardManager(AbstractRewardManager):
 
         return ""
 
+    @staticmethod
+    def _extract_gold_rubric(data_item) -> str:
+        """Extract gold_rubric from reward_model.ground_truth."""
+        reward_model = data_item.non_tensor_batch.get("reward_model", {})
+        if isinstance(reward_model, dict):
+            gt = reward_model.get("ground_truth")
+            if isinstance(gt, dict):
+                return str(gt.get("gold_rubric", "")).strip()
+        return ""
+
     def __call__(self, data: DataProto, return_dict: bool = False):
         reward_from_rm_scores = self._extract_reward_from_rm_scores(data, return_dict)
         if reward_from_rm_scores is not None:
             return reward_from_rm_scores
+
+        # Check if this is a validation call — use fast local metrics instead of Solver/Oracle
+        is_validate = False
+        if hasattr(data, "meta_info") and data.meta_info:
+            is_validate = data.meta_info.get("validate", False)
 
         batch_size = len(data)
         rewards = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
@@ -69,6 +85,7 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         questions: list[str] = []
         rubrics: list[str] = []
         valid_response_lengths: list[int] = []
+        gold_rubrics: list[str] = []
 
         for i in range(batch_size):
             item = data[i]
@@ -96,6 +113,14 @@ class MetaConsensusRewardManager(AbstractRewardManager):
             questions.append(question)
             rubrics.append(response_str)
             valid_response_lengths.append(max(valid_response_len, 1))
+            gold_rubrics.append(self._extract_gold_rubric(item))
+
+        # ── Fast validation path (no Solver/Oracle API calls) ─────────
+        if is_validate:
+            return self._validate_fast(
+                questions, rubrics, gold_rubrics, valid_response_lengths,
+                rewards, batch_size, return_dict,
+            )
 
         global_step = None
         if hasattr(data, "meta_info") and data.meta_info:
@@ -111,6 +136,7 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         print(f"[RewardManager] global_step={global_step}, meta_info keys={list(data.meta_info.keys()) if hasattr(data, 'meta_info') and data.meta_info else 'N/A'}")
         scalar_rewards = self.reward_fn.compute_reward(
             questions, rubrics,
+            gold_rubrics=gold_rubrics,
             global_step=global_step,
             response_token_counts=valid_response_lengths,
         )
@@ -142,13 +168,119 @@ class MetaConsensusRewardManager(AbstractRewardManager):
             reward_extra_info["score"].append(float(score))
 
             # GDPO: store per-component scalar rewards for decoupled normalization
-            comp = self.reward_fn._component_rewards.get(i, (0.0, 0.0, 0.0))
+            comp = self.reward_fn._component_rewards.get(i, (0.0, 0.0, 0.0, 0.0, 0.0))
             reward_extra_info["reward_consensus"].append(float(comp[0]))
             reward_extra_info["reward_disc"].append(float(comp[1]))
             reward_extra_info["reward_qa"].append(float(comp[2]))
+            reward_extra_info["reward_gold_disc"].append(float(comp[3]))
+            reward_extra_info["reward_calibration"].append(float(comp[4]))
 
         if return_dict:
             return {"reward_tensor": rewards, "reward_extra_info": reward_extra_info}
+        return rewards
+
+    # ── Fast validation (no API calls) ─────────────────────────────────
+
+    @staticmethod
+    def _extract_keywords(text: str) -> set[str]:
+        """Extract lower-cased significant words (len>=4) from text."""
+        words = re.findall(r"[a-zA-Z]{4,}", text.lower())
+        # Exclude very common English stop words
+        stop = {"this", "that", "with", "from", "have", "will", "been", "should",
+                "could", "would", "which", "their", "there", "about", "into",
+                "also", "does", "than", "when", "what", "were", "they", "some",
+                "more", "most", "each", "only", "such", "very", "just", "like"}
+        return {w for w in words if w not in stop}
+
+    def _validate_fast(
+        self,
+        questions: list[str],
+        rubrics: list[str],
+        gold_rubrics: list[str],
+        valid_response_lengths: list[int],
+        rewards: torch.Tensor,
+        batch_size: int,
+        return_dict: bool,
+    ):
+        """Fast validation using local rubric quality metrics (no Solver/Oracle).
+
+        Metrics computed per rubric:
+        - n_criteria: number of parseable criteria
+        - n_positive / n_negative: sign balance
+        - avg_criterion_len: mean character length of criterion text
+        - format_compliance: fraction of non-blank lines that parse as criteria
+        - binary_sign_ratio: fraction of criteria with only [+] or [-] (no points)
+        - gold_keyword_recall: fraction of gold rubric keywords covered
+        - gold_keyword_precision: fraction of generated keywords that appear in gold
+        - gold_keyword_f1: harmonic mean of precision and recall
+
+        The composite score (used as reward for GDPO advantage) is gold_keyword_f1,
+        which directly measures how well the generated rubric covers the gold rubric's
+        content without needing Judge API calls.
+        """
+        reward_extra_info = defaultdict(list)
+
+        for i in range(batch_size):
+            rubric = rubrics[i]
+            gold_rubric = gold_rubrics[i] if i < len(gold_rubrics) else ""
+            resp_len = valid_response_lengths[i]
+
+            criteria = parse_rubric_text(rubric)
+            n_criteria = len(criteria)
+            n_positive = sum(1 for c in criteria if c.sign == "+")
+            n_negative = sum(1 for c in criteria if c.sign == "-")
+
+            # Average criterion text length
+            crit_lengths = [len(c.text) for c in criteria]
+            avg_crit_len = float(np.mean(crit_lengths)) if crit_lengths else 0.0
+
+            # Format compliance: how many non-blank lines are valid criteria
+            non_blank = [ln for ln in rubric.splitlines() if ln.strip()]
+            n_parseable = sum(1 for ln in non_blank if _CRITERION_RE.match(ln))
+            format_compliance = n_parseable / max(len(non_blank), 1)
+
+            # Gold keyword coverage
+            gen_kw = self._extract_keywords(rubric)
+            gold_kw = self._extract_keywords(gold_rubric) if gold_rubric else set()
+
+            if gold_kw and gen_kw:
+                overlap = gen_kw & gold_kw
+                recall = len(overlap) / len(gold_kw)
+                precision = len(overlap) / len(gen_kw)
+                f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+            elif not gold_kw:
+                recall, precision, f1 = 0.0, 0.0, 0.0
+            else:
+                recall, precision, f1 = 0.0, 0.0, 0.0
+
+            # Composite score: weighted combination
+            # f1 rewards content coverage; n_criteria in [3,15] is a soft indicator
+            crit_count_ok = 1.0 if 3 <= n_criteria <= 15 else 0.0
+            has_both_signs = 1.0 if n_positive > 0 and n_negative > 0 else 0.0
+            composite = f1 * 5.0 + format_compliance + crit_count_ok + has_both_signs
+
+            rewards[i, :resp_len] = composite
+
+            reward_extra_info["score"].append(composite)
+            reward_extra_info["val_n_criteria"].append(float(n_criteria))
+            reward_extra_info["val_n_positive"].append(float(n_positive))
+            reward_extra_info["val_n_negative"].append(float(n_negative))
+            reward_extra_info["val_avg_crit_len"].append(avg_crit_len)
+            reward_extra_info["val_format_compliance"].append(format_compliance)
+            reward_extra_info["val_gold_kw_recall"].append(recall)
+            reward_extra_info["val_gold_kw_precision"].append(precision)
+            reward_extra_info["val_gold_kw_f1"].append(f1)
+            reward_extra_info["val_crit_count_ok"].append(crit_count_ok)
+            reward_extra_info["val_has_both_signs"].append(has_both_signs)
+
+        print(f"[ValReward] Fast validation: {batch_size} rubrics, "
+              f"mean_f1={np.mean(reward_extra_info['val_gold_kw_f1']):.3f}, "
+              f"mean_recall={np.mean(reward_extra_info['val_gold_kw_recall']):.3f}, "
+              f"mean_n_criteria={np.mean(reward_extra_info['val_n_criteria']):.1f}, "
+              f"mean_format={np.mean(reward_extra_info['val_format_compliance']):.3f}")
+
+        if return_dict:
+            return {"reward_tensor": rewards, "reward_extra_info": dict(reward_extra_info)}
         return rewards
 
     # ── Token-level duplication penalty ────────────────────────────────
