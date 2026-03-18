@@ -130,7 +130,7 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         # ── Fast validation path (no Solver/Oracle API calls) ─────────
         if is_validate:
             return self._validate_fast(
-                questions, rubrics, gold_rubrics, gold_answers, valid_response_lengths,
+                questions, rubrics, gold_rubrics, valid_response_lengths,
                 rewards, batch_size, return_dict,
             )
 
@@ -210,7 +210,6 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         questions: list[str],
         rubrics: list[str],
         gold_rubrics: list[str],
-        gold_answers: list[str],
         valid_response_lengths: list[int],
         rewards: torch.Tensor,
         batch_size: int,
@@ -293,9 +292,9 @@ class MetaConsensusRewardManager(AbstractRewardManager):
               f"mean_n_criteria={np.mean(reward_extra_info['val_n_criteria']):.1f}, "
               f"mean_format={np.mean(reward_extra_info['val_format_compliance']):.3f}")
 
-        # ── Oracle-based rubric quality metrics (small subset) ─────────
-        oracle_metrics = self._validate_oracle_subset(
-            questions, rubrics, gold_answers, batch_size,
+        # ── Oracle-based pairwise rubric quality metrics (meta_eval subset) ──
+        oracle_metrics = self._validate_pairwise_oracle(
+            questions, rubrics, batch_size,
         )
         if oracle_metrics:
             for key, values in oracle_metrics.items():
@@ -305,96 +304,199 @@ class MetaConsensusRewardManager(AbstractRewardManager):
             return {"reward_tensor": rewards, "reward_extra_info": dict(reward_extra_info)}
         return rewards
 
-    # ── Oracle-based validation metrics ─────────────────────────────────
+    # ── Oracle-based pairwise validation (HealthBench meta_eval) ────────
 
-    VAL_ORACLE_SUBSET = 10  # number of prompts to evaluate with Oracle
+    VAL_ORACLE_PROMPTS = 8  # number of prompts to evaluate with Oracle
+    _meta_eval_index = None  # lazily loaded: question_prefix -> list[{completion, label_score}]
 
-    def _validate_oracle_subset(
+    @classmethod
+    def _load_meta_eval_index(cls) -> dict[str, list[dict]]:
+        """Load benchmark_meta_eval.jsonl, grouped by question text prefix."""
+        if cls._meta_eval_index is not None:
+            return cls._meta_eval_index
+        import json
+        meta_path = "data/healthbench_splits/benchmark_meta_eval.jsonl"
+        index: dict[str, list[dict]] = {}
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    row = json.loads(line)
+                    prompt = row.get("prompt", [])
+                    user_content = ""
+                    if isinstance(prompt, list):
+                        for msg in prompt:
+                            if msg.get("role") == "user":
+                                user_content = msg.get("content", "")
+                                break
+                    else:
+                        user_content = str(prompt)
+                    key = user_content[:150]
+                    binary_labels = row.get("binary_labels", [])
+                    label_score = float(sum(1 for x in binary_labels if x) / len(binary_labels)) if binary_labels else 0.0
+                    if key not in index:
+                        index[key] = []
+                    index[key].append({
+                        "completion": row.get("completion", ""),
+                        "label_score": label_score,
+                    })
+            print(f"[ValReward] Loaded meta_eval index: {len(index)} prompts")
+        except FileNotFoundError:
+            print(f"[ValReward] WARNING: {meta_path} not found, Oracle pairwise validation disabled")
+            index = {}
+        cls._meta_eval_index = index
+        return index
+
+    def _validate_pairwise_oracle(
         self,
         questions: list[str],
         rubrics: list[str],
-        gold_answers: list[str],
         batch_size: int,
     ) -> dict[str, list[float]]:
-        """Score gold answer + mismatched answer against generated rubrics using Oracle.
+        """Evaluate generated rubrics using real HealthBench multi-grade completions.
 
-        Uses a small subset of prompts with available gold answers.
-        For each, scores the gold answer and a mismatched answer (from another question)
-        to measure the rubric's discriminative power.
-
-        Returns dict of metric_name -> list of batch_size values (padded with 0 for non-evaluated).
+        For a subset of val prompts that have meta_eval completions (multiple
+        completions with physician-annotated label_scores), we use the Judge
+        to score all completions against the generated rubric, then compute
+        real pairwise_acc, resolution, and top_bottom_gap — the same metrics
+        used in the full HealthBench rubric quality benchmark.
         """
-        # Collect indices with both a non-empty rubric and gold answer
-        eligible = [
-            i for i in range(batch_size)
-            if i < len(gold_answers) and gold_answers[i].strip()
-            and rubrics[i].strip()
-        ]
-        if len(eligible) < 2:
-            print("[ValReward] Oracle subset: <2 eligible prompts, skipping")
+        meta_index = self._load_meta_eval_index()
+        if not meta_index:
+            return {}
+
+        # Match val questions to meta_eval by stripping "User: " prefix
+        eligible = []  # list of (batch_idx, question_text, meta_key)
+        for i in range(batch_size):
+            q = questions[i]
+            if not rubrics[i].strip():
+                continue
+            content = q[len("User: "):] if q.startswith("User: ") else q
+            key = content[:150]
+            if key in meta_index:
+                completions = meta_index[key]
+                labels = [c["label_score"] for c in completions]
+                # Need at least 2 distinct label values for pairwise metrics
+                if len(set(labels)) >= 2:
+                    eligible.append((i, q, key))
+
+        if not eligible:
+            print("[ValReward] Oracle pairwise: no eligible prompts with meta_eval completions")
             return {}
 
         rng = np.random.default_rng(seed=42)
-        subset = list(rng.choice(eligible, size=min(self.VAL_ORACLE_SUBSET, len(eligible)), replace=False))
+        n_select = min(self.VAL_ORACLE_PROMPTS, len(eligible))
+        selected_indices = rng.choice(len(eligible), size=n_select, replace=False)
+        selected = [eligible[j] for j in selected_indices]
 
         oracle = self.reward_fn.oracle
-        gold_scores = [0.0] * batch_size
-        mismatch_scores = [0.0] * batch_size
-        top1_hits = [0.0] * batch_size
-        resolutions = [0.0] * batch_size
-
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        from scipy.stats import spearmanr
+        import math
 
-        def _score_pair(idx: int) -> tuple[int, float, float]:
-            """Score gold answer and mismatched answer for prompt idx."""
-            q = questions[idx]
-            rubric = rubrics[idx]
-            gold_ans = gold_answers[idx]
+        per_prompt_pairwise_acc = []
+        per_prompt_resolution = []
+        per_prompt_spearman = []
+        per_prompt_top_bottom = []
 
-            # Pick a mismatched answer: gold answer from a different eligible prompt
-            others = [j for j in eligible if j != idx and gold_answers[j].strip()]
-            if not others:
-                return idx, 0.0, 0.0
-            mismatch_idx = others[rng.integers(len(others))]
-            mismatch_ans = gold_answers[mismatch_idx]
+        def _eval_prompt(batch_idx: int, question: str, meta_key: str):
+            """Score all meta_eval completions for one prompt against the generated rubric."""
+            completions_data = meta_index[meta_key][:8]  # cap at 8
+            rubric = rubrics[batch_idx]
+            completions = [c["completion"] for c in completions_data]
+            label_scores = [c["label_score"] for c in completions_data]
 
             try:
-                scores = oracle.evaluate_answers_by_rubric(q, [gold_ans, mismatch_ans], rubric)
-                return idx, scores[0], scores[1]
+                pred_scores = oracle.evaluate_batch(
+                    questions=[question] * len(completions),
+                    answers=completions,
+                    rubrics=[rubric] * len(completions),
+                    max_workers=1,
+                )
+                pred_scores = [float(s) for s in pred_scores]
             except Exception as e:
-                print(f"[ValReward] Oracle error for prompt {idx}: {e}")
-                return idx, 0.0, 0.0
+                print(f"[ValReward] Oracle pairwise error for prompt {batch_idx}: {e}")
+                return None
 
-        n_workers = min(len(subset), 4)
+            # Pairwise accuracy and resolution (same as benchmark)
+            correct = 0.0
+            total = 0
+            gap_sum = 0.0
+            for ii in range(len(pred_scores)):
+                for jj in range(ii + 1, len(pred_scores)):
+                    if label_scores[ii] == label_scores[jj]:
+                        continue
+                    total += 1
+                    gap_sum += abs(pred_scores[ii] - pred_scores[jj])
+                    label_order = label_scores[ii] > label_scores[jj]
+                    score_order = pred_scores[ii] > pred_scores[jj]
+                    if pred_scores[ii] == pred_scores[jj]:
+                        correct += 0.5
+                    elif label_order == score_order:
+                        correct += 1.0
+
+            pairwise_acc = correct / total if total > 0 else None
+            resolution = gap_sum / total if total > 0 else None
+
+            # Spearman correlation
+            unique_labels = set(label_scores)
+            spearman_rho = None
+            if len(unique_labels) >= 2 and len(pred_scores) >= 2:
+                rho, _ = spearmanr(pred_scores, label_scores)
+                if not math.isnan(rho):
+                    spearman_rho = rho
+
+            # Top-bottom gap
+            top_bottom = None
+            if len(unique_labels) >= 2:
+                best_label = max(unique_labels)
+                worst_label = min(unique_labels)
+                top_preds = [s for s, y in zip(pred_scores, label_scores) if y == best_label]
+                bot_preds = [s for s, y in zip(pred_scores, label_scores) if y == worst_label]
+                if top_preds and bot_preds:
+                    top_bottom = (sum(top_preds) / len(top_preds)) - (sum(bot_preds) / len(bot_preds))
+
+            return pairwise_acc, resolution, spearman_rho, top_bottom
+
+        # Run in parallel (4 workers, each prompt has ~8 sequential Judge calls)
+        n_workers = min(len(selected), 4)
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
-            futures = {pool.submit(_score_pair, idx): idx for idx in subset}
+            futures = {
+                pool.submit(_eval_prompt, bi, q, mk): bi
+                for bi, q, mk in selected
+            }
             for fut in as_completed(futures):
-                idx, gs, ms = fut.result()
-                gold_scores[idx] = gs
-                mismatch_scores[idx] = ms
-                top1_hits[idx] = 1.0 if gs > ms else 0.0
-                resolutions[idx] = gs - ms
+                result = fut.result()
+                if result is None:
+                    continue
+                pa, res, sp, tb = result
+                if pa is not None:
+                    per_prompt_pairwise_acc.append(pa)
+                if res is not None:
+                    per_prompt_resolution.append(res)
+                if sp is not None:
+                    per_prompt_spearman.append(sp)
+                if tb is not None:
+                    per_prompt_top_bottom.append(tb)
 
-        # Compute aggregate stats for the subset only
-        subset_gold = [gold_scores[i] for i in subset]
-        subset_top1 = [top1_hits[i] for i in subset]
-        subset_res = [resolutions[i] for i in subset]
+        if not per_prompt_pairwise_acc:
+            print("[ValReward] Oracle pairwise: all prompts failed")
+            return {}
 
-        mean_top1 = float(np.mean(subset_top1))
-        mean_res = float(np.mean(subset_res))
-        mean_gold = float(np.mean(subset_gold))
+        mean_pa = float(np.mean(per_prompt_pairwise_acc))
+        mean_res = float(np.mean(per_prompt_resolution)) if per_prompt_resolution else 0.0
+        mean_sp = float(np.mean(per_prompt_spearman)) if per_prompt_spearman else 0.0
+        mean_tb = float(np.mean(per_prompt_top_bottom)) if per_prompt_top_bottom else 0.0
 
-        print(f"[ValReward] Oracle subset ({len(subset)} prompts): "
-              f"top1_acc={mean_top1:.3f}, "
-              f"resolution={mean_res:.2f}, "
-              f"gold_score={mean_gold:.2f}")
+        print(f"[ValReward] Oracle pairwise ({len(per_prompt_pairwise_acc)} prompts): "
+              f"pairwise_acc={mean_pa:.3f}, resolution={mean_res:.2f}, "
+              f"spearman={mean_sp:.3f}, top_bottom_gap={mean_tb:.2f}")
 
-        # Broadcast aggregate values to all samples so process_validation_metrics
-        # computes the correct mean (each uid sees the same aggregate value).
+        # Broadcast aggregate values to all samples
         return {
-            "val_oracle_top1_acc": [mean_top1] * batch_size,
+            "val_oracle_pairwise_acc": [mean_pa] * batch_size,
             "val_oracle_resolution": [mean_res] * batch_size,
-            "val_oracle_gold_score": [mean_gold] * batch_size,
+            "val_oracle_spearman": [mean_sp] * batch_size,
+            "val_oracle_top_bottom_gap": [mean_tb] * batch_size,
         }
 
     # ── Token-level duplication penalty ────────────────────────────────
