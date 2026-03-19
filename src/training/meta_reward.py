@@ -1028,6 +1028,7 @@ class MetaRewardFunction:
                             "qa": round(detail.get("qa", 0), 4),
                             "gold_disc": round(detail.get("gold_disc", 0), 4),
                             "calibration": round(detail.get("calibration", 0), 4),
+                            "parrot": round(detail.get("parrot", 0), 4),
                             "binary_ratio": round(detail.get("binary_ratio", 0), 4),
                             "n_criteria_total": detail.get("n_total", 0),
                             "n_criteria_unique": detail.get("n_unique", 0),
