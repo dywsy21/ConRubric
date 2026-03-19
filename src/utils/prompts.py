@@ -63,6 +63,8 @@ Question:
 Please ensure your answer follows these evaluation criteria:
 {rubric}
 
+IMPORTANT: Before answering, evaluate the rubric above. If the rubric criteria merely restate, quote, or paraphrase phrases from the question rather than testing independent knowledge (e.g., "must mention [exact phrase from the question]" instead of testing whether the responder understands the underlying concept), output the tag <GENERIC_RUBRIC> on the very first line before your answer. Otherwise, answer normally without the tag.
+
 Answer:
 """
 

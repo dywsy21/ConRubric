@@ -90,67 +90,23 @@ GOLD_DISC_SCALE = float(os.environ.get("GRM_GOLD_DISC_SCALE", "1.0"))
 BINARY_RATIO_FLOOR = float(os.environ.get("GRM_BINARY_RATIO_FLOOR", "0.3"))
 BINARY_PENALTY_SCALE = float(os.environ.get("GRM_BINARY_PENALTY_SCALE", "3.0"))
 
-# ── Anti-parroting: penalise criteria that quote phrases from the question ──
-# Measures what fraction of each criterion's content words come from the question.
-# A criterion that merely restates question phrases adds no evaluation value.
+# ── Anti-parroting: Solver-detected generic/parroting rubrics ─────────────
+# The Solver is instructed to prepend <GENERIC_RUBRIC> when criteria merely
+# restate the question. The penalty is based on what fraction of solver
+# answers in the group flagged the rubric.
+# Full penalty when ALL solvers flag the rubric; scaled down proportionally.
 PARROT_PENALTY_SCALE = float(os.environ.get("GRM_PARROT_PENALTY_SCALE", "10.0"))
-PARROT_RATIO_FLOOR = float(os.environ.get("GRM_PARROT_RATIO_FLOOR", "0.25"))
 
-_PARROT_STOP_WORDS = frozenset({
-    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "need", "must",
-    "and", "or", "but", "if", "not", "no", "nor", "so", "yet",
-    "in", "on", "at", "to", "for", "of", "with", "by", "from", "as",
-    "into", "through", "about", "between", "after", "before",
-    "that", "this", "these", "those", "it", "its", "my", "your", "his",
-    "her", "our", "their", "what", "which", "who", "whom", "how", "when",
-    "where", "why", "any", "all", "each", "every", "both", "few", "more",
-    "most", "other", "some", "such", "than", "too", "very", "just",
-    "answer", "must", "should", "criterion", "criteria", "response",
-    "explicitly", "specifically", "directly", "correctly", "clearly",
-    "mention", "include", "identify", "reference", "state", "provide",
-    "ensure", "address", "explain", "describe", "discuss", "note",
-})
+# Regex to detect the tag (possibly surrounded by whitespace / newlines)
+_GENERIC_RUBRIC_RE = re.compile(r'<\s*GENERIC[_\s]*RUBRIC\s*>', re.IGNORECASE)
 
 
-def _content_words(text: str) -> set:
-    """Extract lowercased content words (len >= 3, not in stop list)."""
-    return {w for w in re.findall(r'[a-z0-9]+', text.lower())
-            if w not in _PARROT_STOP_WORDS and len(w) >= 3}
-
-
-def _compute_parrot_penalty(question: str, criteria_texts: List[str]) -> float:
-    """Compute penalty for rubric criteria that parrot the question.
-
-    For each criterion, measures what fraction of its content words also appear
-    in the question.  Criteria dominated by question vocabulary are parroting.
-
-    Returns a non-positive float (penalty).
-    """
-    # Strip common prefixes
-    q = re.sub(r'^(User|Human|Assistant):\s*', '', question, flags=re.IGNORECASE)
-    q_words = _content_words(q)
-    if len(q_words) < 3:
-        return 0.0
-
-    crit_parrot_scores = []
-    for crit in criteria_texts:
-        c_words = _content_words(crit)
-        if len(c_words) < 3:
-            crit_parrot_scores.append(0.0)
-            continue
-        # What fraction of criterion words come from the question?
-        overlap = len(q_words & c_words) / len(c_words)
-        crit_parrot_scores.append(overlap)
-
-    if not crit_parrot_scores:
-        return 0.0
-    mean_parrot = float(np.mean(crit_parrot_scores))
-    excess = mean_parrot - PARROT_RATIO_FLOOR
-    if excess > 0:
-        return -PARROT_PENALTY_SCALE * excess
-    return 0.0
+def _strip_generic_rubric_tag(answer: str) -> Tuple[str, bool]:
+    """Strip <GENERIC_RUBRIC> tag from answer. Returns (cleaned_answer, was_flagged)."""
+    if _GENERIC_RUBRIC_RE.search(answer):
+        cleaned = _GENERIC_RUBRIC_RE.sub('', answer).strip()
+        return cleaned, True
+    return answer, False
 
 
 def _find_unique_criteria(
@@ -503,17 +459,31 @@ class MetaRewardFunction:
         gold_answers: Dict[int, str] = {}
         # Gold answer index within the answer pool: q_idx -> int
         gold_answer_indices: Dict[int, int] = {}
+        # Solver-detected parroting: q_idx -> {local_i -> n_flagged_by_other_solvers}
+        # For rubric j, we count how many OTHER solvers (answering with OTHER rubrics)
+        # flagged <GENERIC_RUBRIC> when given rubric j's text.
+        # But simpler: each solver answers with ITS OWN rubric. If the solver flags
+        # its own rubric, that rubric is parroting.
+        parrot_flags: Dict[int, Dict[int, bool]] = {}  # q_idx -> {local_i -> flagged}
 
         def _coordinate_question(q_idx: int, q: str, items: List[Tuple[int, str]], n: int):
             """Wait for solver results, then submit per-criterion oracle evals."""
-            # Collect answers
-            answers = {}  # local_i -> answer text
+            # Collect answers and detect <GENERIC_RUBRIC> flags
+            answers = {}  # local_i -> answer text (tag stripped)
+            q_parrot = {}  # local_i -> bool (was flagged)
             for local_i, fut in solver_futures[q_idx]:
                 try:
-                    answers[local_i] = fut.result(timeout=900)
+                    raw_answer = fut.result(timeout=900)
+                    cleaned, flagged = _strip_generic_rubric_tag(raw_answer)
+                    answers[local_i] = cleaned
+                    q_parrot[local_i] = flagged
+                    if flagged:
+                        print(f"[MetaReward] <GENERIC_RUBRIC> detected Q{q_idx} R{local_i}")
                 except Exception as e:
                     print(f"[MetaReward] Solver error Q{q_idx} rubric {local_i}: {e}")
                     answers[local_i] = ""
+                    q_parrot[local_i] = False
+            parrot_flags[q_idx] = q_parrot
 
             # Collect gold answer: prefer precomputed ideal_completion, fall back to gold solver
             gold_ans = None
@@ -771,8 +741,12 @@ class MetaRewardFunction:
                         if excess > 0:
                             calibration_penalty = -BINARY_PENALTY_SCALE * excess
 
-                    # ── Anti-parroting: penalise criteria that quote the question ──
-                    parrot_penalty = _compute_parrot_penalty(q, crit_texts)
+                    # ── Anti-parroting: Solver-detected <GENERIC_RUBRIC> ──
+                    parrot_penalty = 0.0
+                    q_parrot = parrot_flags.get(q_idx, {})
+                    if q_parrot.get(j, False):
+                        # This rubric's own solver flagged it as generic/parroting
+                        parrot_penalty = -PARROT_PENALTY_SCALE
 
                     rewards[indices[j]] = consensus + disc_reward + qa + gold_disc + calibration_penalty + parrot_penalty
                     # GDPO: store per-component rewards for decoupled normalization
@@ -789,6 +763,7 @@ class MetaRewardFunction:
                         "gold_disc": gold_disc,
                         "calibration": calibration_penalty,
                         "parrot": parrot_penalty,
+                        "parrot_flagged": q_parrot.get(j, False),
                         "binary_ratio": binary_ratio if all_eval_scores else 0.0,
                         "crit_len_penalty": crit_len_penalty,
                         "resp_len_penalty": resp_len_penalty,
@@ -1029,6 +1004,7 @@ class MetaRewardFunction:
                             "gold_disc": round(detail.get("gold_disc", 0), 4),
                             "calibration": round(detail.get("calibration", 0), 4),
                             "parrot": round(detail.get("parrot", 0), 4),
+                            "parrot_flagged": detail.get("parrot_flagged", False),
                             "binary_ratio": round(detail.get("binary_ratio", 0), 4),
                             "n_criteria_total": detail.get("n_total", 0),
                             "n_criteria_unique": detail.get("n_unique", 0),
