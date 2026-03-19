@@ -338,6 +338,7 @@ GDPO_COMPONENT_WEIGHTS = {
     "reward_qa": 0.5,
     "reward_gold_disc": 2.0,
     "reward_calibration": 0.5,
+    "reward_parrot": 3.0,
 }
 
 

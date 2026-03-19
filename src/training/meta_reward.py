@@ -90,6 +90,68 @@ GOLD_DISC_SCALE = float(os.environ.get("GRM_GOLD_DISC_SCALE", "1.0"))
 BINARY_RATIO_FLOOR = float(os.environ.get("GRM_BINARY_RATIO_FLOOR", "0.3"))
 BINARY_PENALTY_SCALE = float(os.environ.get("GRM_BINARY_PENALTY_SCALE", "3.0"))
 
+# ── Anti-parroting: penalise criteria that quote phrases from the question ──
+# Measures what fraction of each criterion's content words come from the question.
+# A criterion that merely restates question phrases adds no evaluation value.
+PARROT_PENALTY_SCALE = float(os.environ.get("GRM_PARROT_PENALTY_SCALE", "10.0"))
+PARROT_RATIO_FLOOR = float(os.environ.get("GRM_PARROT_RATIO_FLOOR", "0.25"))
+
+_PARROT_STOP_WORDS = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "must",
+    "and", "or", "but", "if", "not", "no", "nor", "so", "yet",
+    "in", "on", "at", "to", "for", "of", "with", "by", "from", "as",
+    "into", "through", "about", "between", "after", "before",
+    "that", "this", "these", "those", "it", "its", "my", "your", "his",
+    "her", "our", "their", "what", "which", "who", "whom", "how", "when",
+    "where", "why", "any", "all", "each", "every", "both", "few", "more",
+    "most", "other", "some", "such", "than", "too", "very", "just",
+    "answer", "must", "should", "criterion", "criteria", "response",
+    "explicitly", "specifically", "directly", "correctly", "clearly",
+    "mention", "include", "identify", "reference", "state", "provide",
+    "ensure", "address", "explain", "describe", "discuss", "note",
+})
+
+
+def _content_words(text: str) -> set:
+    """Extract lowercased content words (len >= 3, not in stop list)."""
+    return {w for w in re.findall(r'[a-z0-9]+', text.lower())
+            if w not in _PARROT_STOP_WORDS and len(w) >= 3}
+
+
+def _compute_parrot_penalty(question: str, criteria_texts: List[str]) -> float:
+    """Compute penalty for rubric criteria that parrot the question.
+
+    For each criterion, measures what fraction of its content words also appear
+    in the question.  Criteria dominated by question vocabulary are parroting.
+
+    Returns a non-positive float (penalty).
+    """
+    # Strip common prefixes
+    q = re.sub(r'^(User|Human|Assistant):\s*', '', question, flags=re.IGNORECASE)
+    q_words = _content_words(q)
+    if len(q_words) < 3:
+        return 0.0
+
+    crit_parrot_scores = []
+    for crit in criteria_texts:
+        c_words = _content_words(crit)
+        if len(c_words) < 3:
+            crit_parrot_scores.append(0.0)
+            continue
+        # What fraction of criterion words come from the question?
+        overlap = len(q_words & c_words) / len(c_words)
+        crit_parrot_scores.append(overlap)
+
+    if not crit_parrot_scores:
+        return 0.0
+    mean_parrot = float(np.mean(crit_parrot_scores))
+    excess = mean_parrot - PARROT_RATIO_FLOOR
+    if excess > 0:
+        return -PARROT_PENALTY_SCALE * excess
+    return 0.0
+
 
 def _find_unique_criteria(
     crit_scores: Dict[int, Dict[int, float]],
@@ -539,7 +601,7 @@ class MetaRewardFunction:
                 # Single rollout: quality adjustment only (no cross-evaluation)
                 qa = float(quality_adjustments[indices[0]]) if RUBRIC_QUALITY_CONFIG.enabled else 0.0
                 rewards[indices[0]] = qa
-                self._component_rewards[indices[0]] = (0.0, 0.0, qa, 0.0, 0.0)
+                self._component_rewards[indices[0]] = (0.0, 0.0, qa, 0.0, 0.0, 0.0)
                 all_rollout_details[q_idx] = {}
             else:
                 # Build per-criterion score matrix:
@@ -709,9 +771,12 @@ class MetaRewardFunction:
                         if excess > 0:
                             calibration_penalty = -BINARY_PENALTY_SCALE * excess
 
-                    rewards[indices[j]] = consensus + disc_reward + qa + gold_disc + calibration_penalty
+                    # ── Anti-parroting: penalise criteria that quote the question ──
+                    parrot_penalty = _compute_parrot_penalty(q, crit_texts)
+
+                    rewards[indices[j]] = consensus + disc_reward + qa + gold_disc + calibration_penalty + parrot_penalty
                     # GDPO: store per-component rewards for decoupled normalization
-                    self._component_rewards[indices[j]] = (consensus, disc_reward, qa, gold_disc, calibration_penalty)
+                    self._component_rewards[indices[j]] = (consensus, disc_reward, qa, gold_disc, calibration_penalty, parrot_penalty)
 
                     rollout_details[j] = {
                         "n_total": n_total_crit,
@@ -723,6 +788,7 @@ class MetaRewardFunction:
                         "qa": qa,
                         "gold_disc": gold_disc,
                         "calibration": calibration_penalty,
+                        "parrot": parrot_penalty,
                         "binary_ratio": binary_ratio if all_eval_scores else 0.0,
                         "crit_len_penalty": crit_len_penalty,
                         "resp_len_penalty": resp_len_penalty,
@@ -740,24 +806,27 @@ class MetaRewardFunction:
                 g_qa = [rollout_details[j].get("qa", 0.0) for j in range(n)]
                 g_gold = [rollout_details[j].get("gold_disc", 0.0) for j in range(n)]
                 g_cal = [rollout_details[j].get("calibration", 0.0) for j in range(n)]
+                g_parrot = [rollout_details[j].get("parrot", 0.0) for j in range(n)]
                 n_cons = self._gdpo_normalize_group(g_cons, weight=w["consensus"])
                 n_disc = self._gdpo_normalize_group(g_disc, weight=w["disc"])
                 n_qa = self._gdpo_normalize_group(g_qa, weight=w["qa"])
                 n_gold = self._gdpo_normalize_group(g_gold, weight=w["gold_disc"])
                 n_cal = self._gdpo_normalize_group(g_cal, weight=w["calibration"])
+                n_parrot = self._gdpo_normalize_group(g_parrot, weight=w["parrot"])
                 gold_rubric_avail = q_to_gold_rubric.get(q, "") != ""
                 for j in range(n):
                     rd = rollout_details[j]
-                    gdpo_adv = n_cons[j] + n_disc[j] + n_qa[j] + n_gold[j] + n_cal[j]
+                    gdpo_adv = n_cons[j] + n_disc[j] + n_qa[j] + n_gold[j] + n_cal[j] + n_parrot[j]
                     gold_str = f"gold_disc={rd.get('gold_disc', 0):.2f}(×{w['gold_disc']:.1f}→{n_gold[j]:+.3f})  " if gold_rubric_avail else ""
                     cal_str = f"cal={rd.get('calibration', 0):.2f}(bin={rd.get('binary_ratio', 0):.0%})(×{w['calibration']:.1f}→{n_cal[j]:+.3f})"
+                    parrot_str = f"  parrot={rd.get('parrot', 0):.2f}(×{w['parrot']:.1f}→{n_parrot[j]:+.3f})" if rd.get('parrot', 0) != 0 else ""
                     print(f"[MetaReward]   Q{q_idx} R{j}: {rd['n_total']} criteria → "
                           f"{rd['n_unique']} unique, reward={rd['reward']:.2f}  "
                           f"gdpo={gdpo_adv:+.3f}  "
                           f"cons={rd['consensus']:.2f}(×{w['consensus']:.1f}→{n_cons[j]:+.3f})  "
                           f"disc={rd['disc']:.2f}(×{w['disc']:.1f}→{n_disc[j]:+.3f})  "
                           f"qa={rd['qa']:.2f}(×{w['qa']:.1f}→{n_qa[j]:+.3f})  "
-                          f"{gold_str}{cal_str}")
+                          f"{gold_str}{cal_str}{parrot_str}")
 
             with progress_lock:
                 progress["q_done"] += 1
@@ -788,7 +857,7 @@ class MetaRewardFunction:
         return rewards
 
     # GDPO per-component weights (must match core_algos.GDPO_COMPONENT_WEIGHTS)
-    GDPO_WEIGHTS = {"consensus": 1.0, "disc": 1.0, "qa": 0.5, "gold_disc": 2.0, "calibration": 0.5}
+    GDPO_WEIGHTS = {"consensus": 1.0, "disc": 1.0, "qa": 0.5, "gold_disc": 2.0, "calibration": 0.5, "parrot": 3.0}
 
     @staticmethod
     def _gdpo_normalize_group(values: List[float], weight: float = 1.0, epsilon: float = 1e-6) -> List[float]:
@@ -829,20 +898,23 @@ class MetaRewardFunction:
             group_qa = [details.get(j, {}).get("qa", 0.0) for j in range(len(items))]
             group_gold = [details.get(j, {}).get("gold_disc", 0.0) for j in range(len(items))]
             group_cal = [details.get(j, {}).get("calibration", 0.0) for j in range(len(items))]
+            group_parrot = [details.get(j, {}).get("parrot", 0.0) for j in range(len(items))]
             w = self.GDPO_WEIGHTS
             norm_cons = self._gdpo_normalize_group(group_cons, weight=w["consensus"])
             norm_disc = self._gdpo_normalize_group(group_disc, weight=w["disc"])
             norm_qa = self._gdpo_normalize_group(group_qa, weight=w["qa"])
             norm_gold = self._gdpo_normalize_group(group_gold, weight=w["gold_disc"])
             norm_cal = self._gdpo_normalize_group(group_cal, weight=w["calibration"])
+            norm_parrot = self._gdpo_normalize_group(group_parrot, weight=w["parrot"])
 
             print(f"\n[Q{q_idx+1}] {q}")
-            print(f"  ({len(items)} rollouts)  GDPO weights: cons={w['consensus']:.1f}, disc={w['disc']:.1f}, qa={w['qa']:.1f}, gold={w['gold_disc']:.1f}, cal={w['calibration']:.1f}")
+            print(f"  ({len(items)} rollouts)  GDPO weights: cons={w['consensus']:.1f}, disc={w['disc']:.1f}, qa={w['qa']:.1f}, gold={w['gold_disc']:.1f}, cal={w['calibration']:.1f}, parrot={w['parrot']:.1f}")
             print(f"  Group stats: consensus μ={np.mean(group_cons):.2f} σ={np.std(group_cons):.2f}, "
                   f"disc μ={np.mean(group_disc):.2f} σ={np.std(group_disc):.2f}, "
                   f"qa μ={np.mean(group_qa):.2f} σ={np.std(group_qa):.2f}, "
                   f"gold_disc μ={np.mean(group_gold):.2f} σ={np.std(group_gold):.2f}, "
-                  f"cal μ={np.mean(group_cal):.2f} σ={np.std(group_cal):.2f}")
+                  f"cal μ={np.mean(group_cal):.2f} σ={np.std(group_cal):.2f}, "
+                  f"parrot μ={np.mean(group_parrot):.2f} σ={np.std(group_parrot):.2f}")
 
             for local_i, (global_idx, rubric) in enumerate(items):
                 r = rewards[global_idx].item()
@@ -852,7 +924,8 @@ class MetaRewardFunction:
                 qa_raw = detail.get('qa', 0.0)
                 gold_raw = detail.get('gold_disc', 0.0)
                 cal_raw = detail.get('calibration', 0.0)
-                gdpo_adv = norm_cons[local_i] + norm_disc[local_i] + norm_qa[local_i] + norm_gold[local_i] + norm_cal[local_i]
+                parrot_raw = detail.get('parrot', 0.0)
+                gdpo_adv = norm_cons[local_i] + norm_disc[local_i] + norm_qa[local_i] + norm_gold[local_i] + norm_cal[local_i] + norm_parrot[local_i]
 
                 print(f"\n  {'─'*70}")
                 print(f"  Rubric {local_i+1}  reward={r:.3f}  "
@@ -860,8 +933,9 @@ class MetaRewardFunction:
                 print(f"    cons={cons_raw:.2f}(×{w['consensus']:.1f}→{norm_cons[local_i]:+.3f})  |  "
                       f"disc={disc_raw:.2f}(×{w['disc']:.1f}→{norm_disc[local_i]:+.3f})  |  "
                       f"qa={qa_raw:.2f}(×{w['qa']:.1f}→{norm_qa[local_i]:+.3f})")
+                parrot_str = f"  |  parrot={parrot_raw:.2f}(×{w['parrot']:.1f}→{norm_parrot[local_i]:+.3f})" if parrot_raw != 0 else ""
                 print(f"    gold_disc={gold_raw:.2f}(×{w['gold_disc']:.1f}→{norm_gold[local_i]:+.3f})  |  "
-                      f"cal={cal_raw:.2f}(bin={detail.get('binary_ratio', 0):.0%})(×{w['calibration']:.1f}→{norm_cal[local_i]:+.3f})")
+                      f"cal={cal_raw:.2f}(bin={detail.get('binary_ratio', 0):.0%})(×{w['calibration']:.1f}→{norm_cal[local_i]:+.3f}){parrot_str}")
                 print(f"  Criteria: {detail.get('n_total', '?')} total → "
                       f"{detail.get('n_unique', '?')} unique")
 
@@ -891,12 +965,14 @@ class MetaRewardFunction:
                 g_qa = [details.get(j, {}).get("qa", 0.0) for j in range(n)]
                 g_gold = [details.get(j, {}).get("gold_disc", 0.0) for j in range(n)]
                 g_cal = [details.get(j, {}).get("calibration", 0.0) for j in range(n)]
+                g_parrot = [details.get(j, {}).get("parrot", 0.0) for j in range(n)]
                 n_cons = self._gdpo_normalize_group(g_cons, weight=self.GDPO_WEIGHTS["consensus"])
                 n_disc = self._gdpo_normalize_group(g_disc, weight=self.GDPO_WEIGHTS["disc"])
                 n_qa = self._gdpo_normalize_group(g_qa, weight=self.GDPO_WEIGHTS["qa"])
                 n_gold = self._gdpo_normalize_group(g_gold, weight=self.GDPO_WEIGHTS["gold_disc"])
                 n_cal = self._gdpo_normalize_group(g_cal, weight=self.GDPO_WEIGHTS["calibration"])
-                gdpo_advs = [n_cons[j] + n_disc[j] + n_qa[j] + n_gold[j] + n_cal[j] for j in range(n)]
+                n_parrot = self._gdpo_normalize_group(g_parrot, weight=self.GDPO_WEIGHTS["parrot"])
+                gdpo_advs = [n_cons[j] + n_disc[j] + n_qa[j] + n_gold[j] + n_cal[j] + n_parrot[j] for j in range(n)]
                 n_unique_list = [details.get(j, {}).get("n_unique", "?") for j in range(n)]
                 rews = [rewards[it[0]].item() for it in items]
                 gold_ds = [f'{details.get(j, {}).get("gold_disc", 0):.1f}' for j in range(n)]
