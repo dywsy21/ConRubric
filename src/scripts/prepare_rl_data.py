@@ -43,7 +43,7 @@ def _format_rubric_item(item) -> str:
     return ""
 
 
-def _make_row(question: str, rubric_items: list, source: str, gold_answer: str = "") -> dict:
+def _make_row(question: str, rubric_items: list, source: str, gold_answer: str = "", prompt_id: str = "") -> dict:
     """Build a single verl-compatible row."""
     prompt_messages = [
         {
@@ -72,6 +72,7 @@ def _make_row(question: str, rubric_items: list, source: str, gold_answer: str =
         },
         "extra_info": {
             "question": question,
+            "prompt_id": prompt_id,
         },
     }
 
@@ -131,6 +132,7 @@ def _load_healthbench(limit: int | None = None) -> list[dict]:
                     rubric_items=rubric_items,
                     source=item.get("source", "healthbench"),
                     gold_answer=item.get("ideal_completion", ""),
+                    prompt_id=item.get("prompt_id", ""),
                 )
             )
             if limit is not None and len(rows) >= limit:
@@ -184,6 +186,7 @@ def _prepare_val_parquet(
 
     Uses the benchmark split (20%) which is guaranteed leak-free from SFT/RL train.
     The gold rubric is stored in ground_truth for keyword coverage evaluation.
+    Prioritizes questions that have meta_eval completions (for pairwise Oracle validation).
     """
     split_paths = ensure_healthbench_splits(
         output_dir="data/healthbench_splits",
@@ -192,7 +195,26 @@ def _prepare_val_parquet(
         force_rebuild=False,
     )
 
-    rows: list[dict] = []
+    # Load meta_eval prompt_ids (questions with physician-labeled completions)
+    meta_eval_pids: set[str] = set()
+    meta_eval_path = os.path.join(os.path.dirname(split_paths.benchmark_prompt_pool),
+                                   "benchmark_meta_eval.jsonl")
+    if os.path.exists(meta_eval_path):
+        from collections import defaultdict
+        pid_labels = defaultdict(list)
+        with open(meta_eval_path, "r", encoding="utf-8") as f:
+            for line in f:
+                row = json.loads(line)
+                pid = row.get("prompt_id", "")
+                bl = row.get("binary_labels", [])
+                ls = float(sum(1 for x in bl if x) / len(bl)) if bl else 0.0
+                pid_labels[pid].append(ls)
+        # Only include prompt_ids with >=2 distinct label scores (useful for pairwise)
+        meta_eval_pids = {pid for pid, scores in pid_labels.items() if len(set(scores)) >= 2}
+        print(f"[prepare_rl_data] Meta_eval: {len(meta_eval_pids)} prompt_ids with >=2 distinct labels")
+
+    meta_rows: list[dict] = []
+    other_rows: list[dict] = []
     with open(split_paths.benchmark_prompt_pool, "r", encoding="utf-8") as f:
         for line in f:
             item = json.loads(line)
@@ -200,25 +222,43 @@ def _prepare_val_parquet(
             rubric_list = item.get("rubrics", [])
             if not question or not rubric_list:
                 continue
-            rows.append(
-                _make_row(
-                    question=question,
-                    rubric_items=rubric_list,
-                    source="healthbench_val",
-                    gold_answer=item.get("ideal_completion", ""),
-                )
+            prompt_id = item.get("prompt_id", "")
+            row = _make_row(
+                question=question,
+                rubric_items=rubric_list,
+                source="healthbench_val",
+                gold_answer=item.get("ideal_completion", ""),
+                prompt_id=prompt_id,
             )
+            if prompt_id in meta_eval_pids:
+                meta_rows.append(row)
+            else:
+                other_rows.append(row)
 
     rng = np.random.default_rng(seed=seed)
-    if max_prompts and len(rows) > max_prompts:
-        indices = rng.choice(len(rows), size=max_prompts, replace=False)
-        rows = [rows[i] for i in sorted(indices)]
 
-    df = pd.DataFrame(rows)
+    # Prioritize meta_eval rows, then fill with others up to max_prompts
+    if max_prompts and len(meta_rows) > max_prompts:
+        indices = rng.choice(len(meta_rows), size=max_prompts, replace=False)
+        selected = [meta_rows[i] for i in sorted(indices)]
+    elif max_prompts:
+        selected = list(meta_rows)
+        remaining = max_prompts - len(selected)
+        if remaining > 0 and other_rows:
+            n_other = min(remaining, len(other_rows))
+            indices = rng.choice(len(other_rows), size=n_other, replace=False)
+            selected.extend(other_rows[i] for i in sorted(indices))
+    else:
+        selected = meta_rows + other_rows
+
+    rng.shuffle(selected)
+
+    df = pd.DataFrame(selected)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     df.to_parquet(output_path)
 
-    print(f"[prepare_rl_data] Validation parquet: {len(df)} rows → {output_path}")
+    n_meta = sum(1 for r in selected if r.get("extra_info", {}).get("prompt_id", "") in meta_eval_pids)
+    print(f"[prepare_rl_data] Validation parquet: {len(df)} rows ({n_meta} with meta_eval) → {output_path}")
     return output_path
 
 

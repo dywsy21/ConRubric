@@ -9,7 +9,7 @@ defaults:
   - _self_
 
 data:
-  train_files: ['data/rl_train_healthbench.parquet']   # HealthBench-only for faster RL validation
+  train_files: ['data/rl_train.parquet']                # HealthBench with gold_answers
   val_files: ['data/rl_val_healthbench.parquet']       # Small benchmark split for fast periodic validation
   prompt_key: prompt
   reward_fn_key: data_source

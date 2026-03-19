@@ -97,14 +97,15 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         valid_response_lengths: list[int] = []
         gold_rubrics: list[str] = []
         gold_answers: list[str] = []
+        prompt_ids: list[str] = []
 
         for i in range(batch_size):
             item = data[i]
 
-            prompt_ids = item.batch["prompts"]
-            prompt_len = prompt_ids.shape[-1]
+            prompt_ids_tensor = item.batch["prompts"]
+            prompt_len = prompt_ids_tensor.shape[-1]
             valid_prompt_len = int(item.batch["attention_mask"][:prompt_len].sum().item())
-            valid_prompt_ids = prompt_ids[-valid_prompt_len:]
+            valid_prompt_ids_tensor = prompt_ids_tensor[-valid_prompt_len:]
 
             response_ids = item.batch["responses"]
             valid_response_len = int(item.batch["attention_mask"][prompt_len:].sum().item())
@@ -119,19 +120,20 @@ class MetaConsensusRewardManager(AbstractRewardManager):
             # Extract source question from ground_truth / extra_info. Last fallback is decoded prompt.
             question = self._extract_question(item)
             if not question:
-                question = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
+                question = self.tokenizer.decode(valid_prompt_ids_tensor, skip_special_tokens=True)
 
             questions.append(question)
             rubrics.append(response_str)
             valid_response_lengths.append(max(valid_response_len, 1))
             gold_rubrics.append(self._extract_gold_rubric(item))
             gold_answers.append(self._extract_gold_answer(item))
+            prompt_ids.append(self._extract_prompt_id(item))
 
         # ── Fast validation path (no Solver/Oracle API calls) ─────────
         if is_validate:
             return self._validate_fast(
                 questions, rubrics, gold_rubrics, valid_response_lengths,
-                rewards, batch_size, return_dict,
+                rewards, batch_size, return_dict, prompt_ids=prompt_ids,
             )
 
         global_step = None
@@ -214,6 +216,7 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         rewards: torch.Tensor,
         batch_size: int,
         return_dict: bool,
+        prompt_ids: list[str] | None = None,
     ):
         """Fast validation using local rubric quality metrics (no Solver/Oracle).
 
@@ -294,7 +297,7 @@ class MetaConsensusRewardManager(AbstractRewardManager):
 
         # ── Oracle-based pairwise rubric quality metrics (meta_eval subset) ──
         oracle_metrics = self._validate_pairwise_oracle(
-            questions, rubrics, batch_size,
+            questions, rubrics, batch_size, prompt_ids=prompt_ids,
         )
         if oracle_metrics:
             for key, values in oracle_metrics.items():
@@ -306,12 +309,12 @@ class MetaConsensusRewardManager(AbstractRewardManager):
 
     # ── Oracle-based pairwise validation (HealthBench meta_eval) ────────
 
-    VAL_ORACLE_PROMPTS = 8  # number of prompts to evaluate with Oracle
-    _meta_eval_index = None  # lazily loaded: question_prefix -> list[{completion, label_score}]
+    VAL_ORACLE_PROMPTS = 32  # number of prompts to evaluate with Oracle
+    _meta_eval_index = None  # lazily loaded: prompt_id -> list[{completion, label_score}]
 
     @classmethod
     def _load_meta_eval_index(cls) -> dict[str, list[dict]]:
-        """Load benchmark_meta_eval.jsonl, grouped by question text prefix."""
+        """Load benchmark_meta_eval.jsonl, grouped by prompt_id."""
         if cls._meta_eval_index is not None:
             return cls._meta_eval_index
         import json
@@ -321,6 +324,10 @@ class MetaConsensusRewardManager(AbstractRewardManager):
             with open(meta_path, "r", encoding="utf-8") as f:
                 for line in f:
                     row = json.loads(line)
+                    prompt_id = row.get("prompt_id", "")
+                    if not prompt_id:
+                        continue
+                    # Also extract the raw question text for the Judge
                     prompt = row.get("prompt", [])
                     user_content = ""
                     if isinstance(prompt, list):
@@ -330,27 +337,35 @@ class MetaConsensusRewardManager(AbstractRewardManager):
                                 break
                     else:
                         user_content = str(prompt)
-                    key = user_content[:150]
                     binary_labels = row.get("binary_labels", [])
                     label_score = float(sum(1 for x in binary_labels if x) / len(binary_labels)) if binary_labels else 0.0
-                    if key not in index:
-                        index[key] = []
-                    index[key].append({
+                    if prompt_id not in index:
+                        index[prompt_id] = {"question": user_content, "completions": []}
+                    index[prompt_id]["completions"].append({
                         "completion": row.get("completion", ""),
                         "label_score": label_score,
                     })
-            print(f"[ValReward] Loaded meta_eval index: {len(index)} prompts")
+            print(f"[ValReward] Loaded meta_eval index: {len(index)} prompts (by prompt_id)")
         except FileNotFoundError:
             print(f"[ValReward] WARNING: {meta_path} not found, Oracle pairwise validation disabled")
             index = {}
         cls._meta_eval_index = index
         return index
 
+    @staticmethod
+    def _extract_prompt_id(data_item) -> str:
+        """Extract prompt_id from extra_info."""
+        extra_info = data_item.non_tensor_batch.get("extra_info", {})
+        if isinstance(extra_info, dict):
+            return str(extra_info.get("prompt_id", "")).strip()
+        return ""
+
     def _validate_pairwise_oracle(
         self,
         questions: list[str],
         rubrics: list[str],
         batch_size: int,
+        prompt_ids: list[str] | None = None,
     ) -> dict[str, list[float]]:
         """Evaluate generated rubrics using real HealthBench multi-grade completions.
 
@@ -359,25 +374,45 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         to score all completions against the generated rubric, then compute
         real pairwise_acc, resolution, and top_bottom_gap — the same metrics
         used in the full HealthBench rubric quality benchmark.
+
+        Matching is done by prompt_id (preferred) with text-prefix fallback.
         """
         meta_index = self._load_meta_eval_index()
         if not meta_index:
             return {}
 
-        # Match val questions to meta_eval by stripping "User: " prefix
-        eligible = []  # list of (batch_idx, question_text, meta_key)
+        # Build text-based fallback index: stripped_question[:150] -> prompt_id
+        _text_to_pid: dict[str, str] = {}
+        for pid, data in meta_index.items():
+            q_text = data.get("question", "")
+            if q_text:
+                _text_to_pid[q_text[:150]] = pid
+
+        # Match val questions to meta_eval
+        eligible = []  # list of (batch_idx, question_text, prompt_id)
         for i in range(batch_size):
-            q = questions[i]
             if not rubrics[i].strip():
                 continue
+
+            # Try prompt_id match first
+            pid = prompt_ids[i] if prompt_ids and i < len(prompt_ids) else ""
+            if pid and pid in meta_index:
+                completions = meta_index[pid]["completions"]
+                labels = [c["label_score"] for c in completions]
+                if len(set(labels)) >= 2:
+                    eligible.append((i, questions[i], pid))
+                continue
+
+            # Fallback: text prefix match (strip "User: " prefix)
+            q = questions[i]
             content = q[len("User: "):] if q.startswith("User: ") else q
             key = content[:150]
-            if key in meta_index:
-                completions = meta_index[key]
+            if key in _text_to_pid:
+                fallback_pid = _text_to_pid[key]
+                completions = meta_index[fallback_pid]["completions"]
                 labels = [c["label_score"] for c in completions]
-                # Need at least 2 distinct label values for pairwise metrics
                 if len(set(labels)) >= 2:
-                    eligible.append((i, q, key))
+                    eligible.append((i, q, fallback_pid))
 
         if not eligible:
             print("[ValReward] Oracle pairwise: no eligible prompts with meta_eval completions")
@@ -387,6 +422,8 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         n_select = min(self.VAL_ORACLE_PROMPTS, len(eligible))
         selected_indices = rng.choice(len(eligible), size=n_select, replace=False)
         selected = [eligible[j] for j in selected_indices]
+
+        print(f"[ValReward] Oracle pairwise: {len(eligible)} eligible, {n_select} selected")
 
         oracle = self.reward_fn.oracle
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -398,16 +435,19 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         per_prompt_spearman = []
         per_prompt_top_bottom = []
 
-        def _eval_prompt(batch_idx: int, question: str, meta_key: str):
+        def _eval_prompt(batch_idx: int, question: str, pid: str):
             """Score all meta_eval completions for one prompt against the generated rubric."""
-            completions_data = meta_index[meta_key][:8]  # cap at 8
+            meta_data = meta_index[pid]
+            completions_data = meta_data["completions"][:8]  # cap at 8
             rubric = rubrics[batch_idx]
+            # Use the meta_eval question text for the Judge (not the "User: " prefixed version)
+            eval_question = meta_data.get("question", question)
             completions = [c["completion"] for c in completions_data]
             label_scores = [c["label_score"] for c in completions_data]
 
             try:
                 pred_scores = oracle.evaluate_batch(
-                    questions=[question] * len(completions),
+                    questions=[eval_question] * len(completions),
                     answers=completions,
                     rubrics=[rubric] * len(completions),
                     max_workers=1,
@@ -461,8 +501,8 @@ class MetaConsensusRewardManager(AbstractRewardManager):
         n_workers = min(len(selected), 4)
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
             futures = {
-                pool.submit(_eval_prompt, bi, q, mk): bi
-                for bi, q, mk in selected
+                pool.submit(_eval_prompt, bi, q, pid): bi
+                for bi, q, pid in selected
             }
             for fut in as_completed(futures):
                 result = fut.result()
