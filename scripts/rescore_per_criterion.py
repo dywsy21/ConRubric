@@ -339,13 +339,16 @@ def main():
     parser.add_argument("--models", nargs="+", default=["base_qwen3_8b", "rl_step_960", "glm5"])
     parser.add_argument("--eval_workers", type=int, default=2,
                         help="Number of parallel prompt-level workers")
+    parser.add_argument("--api_base", type=str, default=None,
+                        help="Override ORACLE_API_BASE (e.g. http://localhost:8203/v1)")
     args = parser.parse_args()
 
     config = ProjectConfig()
+    api_base = args.api_base or config.oracle_api_base
     judge = Judge(
         model_name=config.oracle_model_name,
         api_key=config.oracle_api_key,
-        api_base=config.oracle_api_base,
+        api_base=api_base,
     )
 
     prompt_items, prompt_texts = load_data()
