@@ -19,7 +19,16 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Default parallel settings
 DEFAULT_MAX_WORKERS = int(os.environ.get("GRM_ORACLE_WORKERS", 4))
-from src.utils.prompts import REVERSE_ENGINEER_RUBRIC_PROMPT, DYNAMIC_RUBRIC_EVALUATION_PROMPT, BATCH_RUBRIC_EVALUATION_PROMPT
+from src.utils.prompts import (
+    REVERSE_ENGINEER_RUBRIC_PROMPT,
+    DYNAMIC_RUBRIC_EVALUATION_PROMPT,
+    BATCH_RUBRIC_EVALUATION_PROMPT,
+    PER_CRITERION_EVALUATION_PROMPT,
+)
+from src.training.rubric_quality import parse_rubric_text
+
+# Judge mode: "holistic" (single score for full rubric) or "per_criterion" (score each criterion independently)
+JUDGE_MODE = os.environ.get("JUDGE_MODE", "holistic").lower()
 
 # Global cache directory
 CACHE_DIR = Path(os.environ.get("GRM_CACHE_DIR", "./out/cache"))
@@ -246,6 +255,15 @@ class Judge:
     def evaluate_answer(self, question: str, answer: str, rubric: str = None, max_retries: int = 3) -> float:
         """
         Evaluates an answer and returns a scalar score (0-10).
+        Dispatches to per-criterion or holistic mode based on JUDGE_MODE env var.
+        """
+        if JUDGE_MODE == "per_criterion":
+            return self.evaluate_answer_per_criterion(question, answer, rubric, max_retries)
+        return self._evaluate_answer_holistic(question, answer, rubric, max_retries)
+
+    def _evaluate_answer_holistic(self, question: str, answer: str, rubric: str = None, max_retries: int = 3) -> float:
+        """
+        Holistic evaluation: score answer against full rubric as a single 0-10 score.
         Uses vLLM guided_choice + disable thinking for near-zero parse failures.
         Falls back to regex parsing for non-vLLM backends.
         """
@@ -291,6 +309,93 @@ class Judge:
         
         print("All evaluation retries failed, returning 0.0")
         return 0.0
+
+    def evaluate_answer_per_criterion(self, question: str, answer: str, rubric: str = None, max_retries: int = 3) -> float:
+        """Evaluate an answer by scoring each criterion independently, then summing and normalizing to [0,10].
+
+        For [+] criteria: judge scores 0-10 (10 = criterion fully met). Contributes positively.
+        For [-] criteria: judge scores 0-10 (10 = bad behavior fully present). Contributes negatively (subtracted).
+        Raw sum is linearly mapped from [min_possible, max_possible] to [0, 10].
+        """
+        if not rubric or not rubric.strip():
+            print("Warning: empty rubric in evaluate_answer_per_criterion, returning 0.0")
+            return 0.0
+
+        criteria = parse_rubric_text(rubric)
+        if not criteria:
+            # Fallback to holistic if rubric can't be parsed
+            return self._evaluate_answer_holistic(question, answer, rubric, max_retries)
+
+        n_positive = sum(1 for c in criteria if c.sign == "+")
+        n_negative = sum(1 for c in criteria if c.sign == "-")
+        max_possible = 10.0 * n_positive   # all + criteria get 10
+        min_possible = -10.0 * n_negative   # all - criteria get 10 (subtracted)
+
+        if max_possible == min_possible:
+            return 5.0  # degenerate case
+
+        raw_sum = 0.0
+        for crit in criteria:
+            if crit.sign == "+":
+                sign_label = "POSITIVE"
+                scoring_instruction = (
+                    "Score how well the answer satisfies this positive criterion. "
+                    "0 = criterion completely unmet, 10 = criterion fully satisfied."
+                )
+            else:
+                sign_label = "NEGATIVE"
+                scoring_instruction = (
+                    "Score how much the answer exhibits this bad behavior / mistake. "
+                    "0 = the answer does NOT exhibit this problem at all, "
+                    "10 = the answer fully exhibits this bad behavior."
+                )
+
+            prompt = PER_CRITERION_EVALUATION_PROMPT.format(
+                question=question, answer=answer,
+                sign_label=sign_label, criterion=crit.text,
+                scoring_instruction=scoring_instruction,
+            )
+
+            score = self._score_single_criterion(prompt, max_retries)
+
+            if crit.sign == "+":
+                raw_sum += score
+            else:
+                raw_sum -= score
+
+        # Linear map [min_possible, max_possible] -> [0, 10]
+        normalized = (raw_sum - min_possible) / (max_possible - min_possible) * 10.0
+        return max(0.0, min(10.0, normalized))
+
+    def _score_single_criterion(self, prompt: str, max_retries: int = 3) -> float:
+        """Score a single criterion prompt, returning 0-10."""
+        cache_key = _get_cache_key(self.model_name, prompt)
+
+        guided_extra = {
+            "chat_template_kwargs": {"enable_thinking": False},
+            "guided_choice": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
+        }
+
+        for attempt in range(max_retries):
+            use_cache = (attempt == 0)
+            extra = guided_extra if attempt == 0 else {"chat_template_kwargs": {"enable_thinking": False}}
+            max_tok = 8 if attempt == 0 else 256
+
+            try:
+                response_text = self._call_api_direct(
+                    prompt, temperature=0.0, use_cache=use_cache,
+                    extra_body=extra, max_tokens=max_tok,
+                )
+            except Exception:
+                response_text = self._call_api(prompt, temperature=0.0, use_cache=use_cache)
+
+            score = self._parse_evaluation_response(response_text)
+            if score is not None:
+                if attempt > 0:
+                    _save_to_cache(cache_key, response_text, "judge")
+                return score
+
+        return 5.0  # default middle score on failure
 
     def _call_api_direct(self, prompt: str, temperature: float = 0.0,
                          use_cache: bool = True, extra_body: dict = None,

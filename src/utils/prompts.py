@@ -117,6 +117,26 @@ Rubric:
 Output a single integer from 0 to 10 representing the overall score. Output ONLY the integer, nothing else.
 """
 
+# ── Per-criterion evaluation prompt (used when JUDGE_MODE=per_criterion) ──
+# Each criterion is evaluated independently: the judge scores 0-10 how well
+# the answer satisfies (for [+]) or exhibits the bad behavior (for [-]).
+PER_CRITERION_EVALUATION_PROMPT = """
+Evaluate the Answer to the Question on the following SINGLE criterion.
+
+Question:
+{question}
+
+Answer:
+{answer}
+
+Criterion ({sign_label}):
+{criterion}
+
+{scoring_instruction}
+
+Output a single integer from 0 to 10. Output ONLY the integer, nothing else.
+"""
+
 # ── Oracle: batch-evaluate multiple answers against ONE rubric ────────────
 # Used in RL meta-reward: each rubric evaluates all other answers individually.
 # Scores are absolute (not relative), allowing variance computation across answers.
