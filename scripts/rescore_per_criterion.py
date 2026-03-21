@@ -116,7 +116,7 @@ def score_model(model_name: str, judge: Judge, prompt_items, prompt_texts, eval_
     # Check for existing partial results
     output_dir = f"out/bench_full/{model_name}"
     os.makedirs(output_dir, exist_ok=True)
-    out_file = os.path.join(output_dir, "healthbench_rubric_quality_per_criterion.json")
+    out_file = os.path.join(output_dir, "healthbench_rubric_quality_per_criterion_v2.json")
     done_pids = set()
     results_list = []
     if os.path.exists(out_file):
@@ -149,11 +149,13 @@ def score_model(model_name: str, judge: Judge, prompt_items, prompt_texts, eval_
         pid, prompt_text, rubric, rows = task
         label_scores = [_label_score(r.get("binary_labels", [])) for r in rows]
         pred_scores = []
+        all_details = []
 
         for r in rows:
             completion = r.get("completion", "")
-            score = judge.evaluate_answer(prompt_text, completion, rubric=rubric)
+            score, details = judge.evaluate_answer_per_criterion(prompt_text, completion, rubric=rubric)
             pred_scores.append(float(score))
+            all_details.append(details)
 
         # Pairwise metrics
         correct = 0.0
@@ -184,6 +186,7 @@ def score_model(model_name: str, judge: Judge, prompt_items, prompt_texts, eval_
             "pairs_used": float(total_pairs),
             "pred_scores": pred_scores,
             "label_scores": label_scores,
+            "criterion_details": all_details,
         }
 
     # Score with incremental saves

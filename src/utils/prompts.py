@@ -121,7 +121,7 @@ Output a single integer from 0 to 10 representing the overall score. Output ONLY
 # Each criterion is evaluated independently: the judge scores 0-10 how well
 # the answer satisfies (for [+]) or exhibits the bad behavior (for [-]).
 PER_CRITERION_EVALUATION_PROMPT = """
-Evaluate the Answer to the Question on the following SINGLE criterion.
+Evaluate the Answer to the Question on EACH criterion independently.
 
 Question:
 {question}
@@ -129,12 +129,15 @@ Question:
 Answer:
 {answer}
 
-Criterion ({sign_label}):
-{criterion}
+Criteria to evaluate:
+{criteria_block}
 
-{scoring_instruction}
+Score EACH criterion on 0-10:
+- For [+] (positive) criteria: 10 = criterion fully satisfied, 0 = completely unmet.
+- For [-] (negative) criteria: 10 = the bad behavior is fully present, 0 = not present at all (good).
 
-Output a single integer from 0 to 10. Output ONLY the integer, nothing else.
+Output ONLY a JSON array of exactly {n} integers (0-10), one score per criterion in the order listed above.
+Do NOT output any explanation, markdown, or text — output ONLY the raw JSON array like [7, 3, 9, 2].
 """
 
 # ── Oracle: batch-evaluate multiple answers against ONE rubric ────────────

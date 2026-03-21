@@ -258,7 +258,8 @@ class Judge:
         Dispatches to per-criterion or holistic mode based on JUDGE_MODE env var.
         """
         if JUDGE_MODE == "per_criterion":
-            return self.evaluate_answer_per_criterion(question, answer, rubric, max_retries)
+            score, _ = self.evaluate_answer_per_criterion(question, answer, rubric, max_retries)
+            return score
         return self._evaluate_answer_holistic(question, answer, rubric, max_retries)
 
     def _evaluate_answer_holistic(self, question: str, answer: str, rubric: str = None, max_retries: int = 3) -> float:
@@ -310,21 +311,24 @@ class Judge:
         print("All evaluation retries failed, returning 0.0")
         return 0.0
 
-    def evaluate_answer_per_criterion(self, question: str, answer: str, rubric: str = None, max_retries: int = 3) -> float:
-        """Evaluate an answer by scoring each criterion independently, then summing and normalizing to [0,10].
+    def evaluate_answer_per_criterion(self, question: str, answer: str, rubric: str = None, max_retries: int = 3) -> Tuple[float, List[Dict]]:
+        """Evaluate an answer by scoring all criteria in one call, then summing and normalizing to [0,10].
 
         For [+] criteria: judge scores 0-10 (10 = criterion fully met). Contributes positively.
         For [-] criteria: judge scores 0-10 (10 = bad behavior fully present). Contributes negatively (subtracted).
         Raw sum is linearly mapped from [min_possible, max_possible] to [0, 10].
+
+        Returns (normalized_score, per_criterion_details) where per_criterion_details is a list of
+        {"sign": "+"/"-", "text": ..., "score": int} dicts.
         """
         if not rubric or not rubric.strip():
             print("Warning: empty rubric in evaluate_answer_per_criterion, returning 0.0")
-            return 0.0
+            return 0.0, []
 
         criteria = parse_rubric_text(rubric)
         if not criteria:
             # Fallback to holistic if rubric can't be parsed
-            return self._evaluate_answer_holistic(question, answer, rubric, max_retries)
+            return self._evaluate_answer_holistic(question, answer, rubric, max_retries), []
 
         n_positive = sum(1 for c in criteria if c.sign == "+")
         n_negative = sum(1 for c in criteria if c.sign == "-")
@@ -332,32 +336,27 @@ class Judge:
         min_possible = -10.0 * n_negative   # all - criteria get 10 (subtracted)
 
         if max_possible == min_possible:
-            return 5.0  # degenerate case
+            return 5.0, []
 
+        # Build criteria block for the prompt
+        criteria_lines = []
+        for i, crit in enumerate(criteria):
+            sign_label = "[+]" if crit.sign == "+" else "[-]"
+            criteria_lines.append(f"{i+1}. {sign_label} {crit.text}")
+        criteria_block = "\n".join(criteria_lines)
+
+        prompt = PER_CRITERION_EVALUATION_PROMPT.format(
+            question=question, answer=answer,
+            criteria_block=criteria_block, n=len(criteria),
+        )
+
+        scores = self._score_criteria_batch(prompt, len(criteria), max_retries)
+
+        # Compute raw sum and per-criterion details
+        details = []
         raw_sum = 0.0
-        for crit in criteria:
-            if crit.sign == "+":
-                sign_label = "POSITIVE"
-                scoring_instruction = (
-                    "Score how well the answer satisfies this positive criterion. "
-                    "0 = criterion completely unmet, 10 = criterion fully satisfied."
-                )
-            else:
-                sign_label = "NEGATIVE"
-                scoring_instruction = (
-                    "Score how much the answer exhibits this bad behavior / mistake. "
-                    "0 = the answer does NOT exhibit this problem at all, "
-                    "10 = the answer fully exhibits this bad behavior."
-                )
-
-            prompt = PER_CRITERION_EVALUATION_PROMPT.format(
-                question=question, answer=answer,
-                sign_label=sign_label, criterion=crit.text,
-                scoring_instruction=scoring_instruction,
-            )
-
-            score = self._score_single_criterion(prompt, max_retries)
-
+        for crit, score in zip(criteria, scores):
+            details.append({"sign": crit.sign, "text": crit.text, "score": score})
             if crit.sign == "+":
                 raw_sum += score
             else:
@@ -365,37 +364,57 @@ class Judge:
 
         # Linear map [min_possible, max_possible] -> [0, 10]
         normalized = (raw_sum - min_possible) / (max_possible - min_possible) * 10.0
-        return max(0.0, min(10.0, normalized))
+        return max(0.0, min(10.0, normalized)), details
 
-    def _score_single_criterion(self, prompt: str, max_retries: int = 3) -> float:
-        """Score a single criterion prompt, returning 0-10."""
+    def _score_criteria_batch(self, prompt: str, n_criteria: int, max_retries: int = 3) -> List[float]:
+        """Score all criteria in one API call, returning a list of 0-10 scores."""
         cache_key = _get_cache_key(self.model_name, prompt)
-
-        guided_extra = {
-            "chat_template_kwargs": {"enable_thinking": False},
-            "guided_choice": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
-        }
 
         for attempt in range(max_retries):
             use_cache = (attempt == 0)
-            extra = guided_extra if attempt == 0 else {"chat_template_kwargs": {"enable_thinking": False}}
-            max_tok = 8 if attempt == 0 else 256
-
+            extra = {"chat_template_kwargs": {"enable_thinking": False}}
             try:
                 response_text = self._call_api_direct(
                     prompt, temperature=0.0, use_cache=use_cache,
-                    extra_body=extra, max_tokens=max_tok,
+                    extra_body=extra, max_tokens=256,
                 )
             except Exception:
                 response_text = self._call_api(prompt, temperature=0.0, use_cache=use_cache)
 
-            score = self._parse_evaluation_response(response_text)
-            if score is not None:
+            scores = self._parse_json_scores(response_text, n_criteria)
+            if scores is not None:
                 if attempt > 0:
                     _save_to_cache(cache_key, response_text, "judge")
-                return score
+                return scores
 
-        return 5.0  # default middle score on failure
+            # Invalidate cache on parse failure so next attempt gets fresh response
+            if attempt == 0:
+                _delete_from_cache(cache_key, "judge")
+
+        # Fallback: all 5s
+        return [5.0] * n_criteria
+
+    def _parse_json_scores(self, response_text: str, expected_n: int) -> Optional[List[float]]:
+        """Parse a JSON array of integer scores from response text."""
+        if not response_text:
+            return None
+        try:
+            cleaned = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
+            cleaned = re.sub(r"```(?:json)?\s*", "", cleaned).strip()
+            start = cleaned.find('[')
+            end = cleaned.rfind(']') + 1
+            if start == -1 or end <= start:
+                return None
+            arr = json.loads(cleaned[start:end])
+            if not isinstance(arr, list) or len(arr) != expected_n:
+                return None
+            scores = []
+            for v in arr:
+                s = float(v)
+                scores.append(max(0.0, min(10.0, s)))
+            return scores
+        except Exception:
+            return None
 
     def _call_api_direct(self, prompt: str, temperature: float = 0.0,
                          use_cache: bool = True, extra_body: dict = None,
