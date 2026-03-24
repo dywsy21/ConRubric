@@ -97,6 +97,13 @@ BINARY_PENALTY_SCALE = float(os.environ.get("GRM_BINARY_PENALTY_SCALE", "3.0"))
 # Full penalty when ALL solvers flag the rubric; scaled down proportionally.
 PARROT_PENALTY_SCALE = float(os.environ.get("GRM_PARROT_PENALTY_SCALE", "10.0"))
 
+# ── K-sparse cross-evaluation ─────────────────────────────────────────
+# Each criterion evaluates K randomly sampled other answers (instead of all N-1).
+# 0 = full evaluation (default, backward-compatible).
+# All criteria within the same rollout share the same K answer subset so that
+# Spearman dedup remains valid (needs pairwise correlation over same answers).
+K_SPARSE = int(os.environ.get("GRM_K_SPARSE", "0"))
+
 # Regex to detect the tag (possibly surrounded by whitespace / newlines)
 _GENERIC_RUBRIC_RE = re.compile(r'<\s*GENERIC[_\s]*RUBRIC\s*>', re.IGNORECASE)
 
@@ -314,10 +321,13 @@ class MetaRewardFunction:
         if global_step is not None:
             self._step_counter = global_step
 
+        k_sparse = K_SPARSE
+
         print(f"[MetaReward] Computing rewards for {len(questions)} samples "
               f"(global_step={self._step_counter}), "
               f"solver_workers={solver_workers}, oracle_workers={oracle_workers}, "
               f"solver_n={solver_n or 'all'}, "
+              f"k_sparse={k_sparse or 'full'}, "
               f"disc_scale={DISC_SCALE}, disc_std_floor={DISC_STD_FLOOR}, "
               f"disc_power={DISC_POWER}, spearman_threshold={SPEARMAN_THRESHOLD}, "
               f"rubric_quality={RUBRIC_QUALITY_CONFIG.enabled}, "
@@ -539,14 +549,43 @@ class MetaRewardFunction:
                 other_keys = [ai for ai in all_answer_keys if ai != j]
                 if not other_keys:
                     other_keys = all_answer_keys[:]
-                other_answers = [answers[ai] for ai in other_keys]
+
+                # K-sparse: subsample answers per rollout (all criteria share
+                # the same subset so Spearman dedup remains valid).
+                # Gold answer (if present) is always included for gold_disc.
+                if k_sparse > 0:
+                    solver_keys = [ai for ai in other_keys if ai != gold_idx]
+                    k_eff = min(k_sparse, len(solver_keys))
+                    if k_eff < len(solver_keys):
+                        selected_solver = sorted(random.sample(solver_keys, k_eff))
+                        # Always include gold answer if present
+                        sparse_keys = selected_solver
+                        if gold_idx is not None and gold_idx in other_keys:
+                            sparse_keys = sorted(set(sparse_keys) | {gold_idx})
+                        eval_keys = sparse_keys
+                    else:
+                        eval_keys = other_keys
+                else:
+                    eval_keys = other_keys
+
+                eval_answers = [answers[ai] for ai in eval_keys]
 
                 for k, crit_text in enumerate(criterion_texts):
-                    total_evals += len(other_answers)
+                    total_evals += len(eval_answers)
                     fut = oracle_pool.submit(
-                        _eval_batch_by_rubric, q, other_answers, crit_text
+                        _eval_batch_by_rubric, q, eval_answers, crit_text
                     )
-                    batch_futs.append((j, k, other_keys, fut))
+                    batch_futs.append((j, k, eval_keys, fut))
+
+            if k_sparse > 0:
+                full_evals = sum(
+                    len([ai for ai in all_answer_keys if ai != j])
+                    * len(rollout_criterion_texts.get(q_idx, {}).get(j, []))
+                    for j in range(n)
+                )
+                pct = (1 - total_evals / full_evals) * 100 if full_evals > 0 else 0
+                print(f"[MetaReward]   Q{q_idx}: K-sparse K={k_sparse}, "
+                      f"evals={total_evals} (saved {pct:.0f}% vs full={full_evals})")
 
             with progress_lock:
                 progress["eval_total"] += total_evals
@@ -752,10 +791,12 @@ class MetaRewardFunction:
                     # GDPO: store per-component rewards for decoupled normalization
                     self._component_rewards[indices[j]] = (consensus, disc_reward, qa, gold_disc, calibration_penalty, parrot_penalty)
 
+                    n_answers_evaluated = len(solver_answer_keys)
                     rollout_details[j] = {
                         "n_total": n_total_crit,
                         "n_unique": n_unique,
                         "n_discriminative": len(discriminative_reps),
+                        "n_answers_evaluated": n_answers_evaluated,
                         "n_short_crit": n_short_crit,
                         "consensus": consensus,
                         "disc": disc_reward,
