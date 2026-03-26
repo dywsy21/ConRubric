@@ -768,6 +768,14 @@ class MetaRewardFunction:
                         if gold_disc_per_crit:
                             gold_disc = float(np.mean(gold_disc_per_crit)) * GOLD_DISC_SCALE
 
+                    # ── Unique-rate-aware gold_disc scaling ──────────────
+                    # Reduce gold_disc signal when rubric has many duplicated
+                    # criteria (low unique rate), since the signal is unreliable.
+                    # Effective GDPO weight: 2.0 * factor = [0.2, 2.0]
+                    unique_rate = n_unique / max(n_total_crit, 1)
+                    gold_disc_factor = 0.1 + 0.9 * unique_rate
+                    gold_disc *= gold_disc_factor
+
                     # ── Calibration penalty: penalise binary (0/10) score distributions ──
                     calibration_penalty = 0.0
                     all_eval_scores = []
@@ -802,6 +810,7 @@ class MetaRewardFunction:
                         "disc": disc_reward,
                         "qa": qa,
                         "gold_disc": gold_disc,
+                        "gold_disc_factor": gold_disc_factor,
                         "calibration": calibration_penalty,
                         "parrot": parrot_penalty,
                         "parrot_flagged": q_parrot.get(j, False),
