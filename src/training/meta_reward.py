@@ -1072,6 +1072,7 @@ class MetaRewardFunction:
                             "disc": round(detail.get("disc", 0), 4),
                             "qa": round(detail.get("qa", 0), 4),
                             "gold_disc": round(detail.get("gold_disc", 0), 4),
+                            "gold_disc_factor": round(detail.get("gold_disc_factor", 0), 4),
                             "calibration": round(detail.get("calibration", 0), 4),
                             "parrot": round(detail.get("parrot", 0), 4),
                             "parrot_flagged": detail.get("parrot_flagged", False),
