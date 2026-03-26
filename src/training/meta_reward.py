@@ -238,6 +238,10 @@ class MetaRewardFunction:
         # Per-criterion duplication weights for token-level reward scaling.
         # Populated by compute_reward: {global_idx: [1/cluster_size_k, ...]}
         self._dup_criterion_weights: Dict[int, List[float]] = {}
+        # Monotonically-increasing gold_disc weight schedule.
+        # Tracks EMA of batch-average unique rate; running max ensures monotonicity.
+        self._gold_disc_ema: float = 0.0  # EMA of unique_rate across steps
+        self._gold_disc_factor: float = 0.1  # current scaling factor, monotonically increasing
 
     @property
     def oracle(self):
@@ -768,13 +772,8 @@ class MetaRewardFunction:
                         if gold_disc_per_crit:
                             gold_disc = float(np.mean(gold_disc_per_crit)) * GOLD_DISC_SCALE
 
-                    # ── Unique-rate-aware gold_disc scaling ──────────────
-                    # Reduce gold_disc signal when rubric has many duplicated
-                    # criteria (low unique rate), since the signal is unreliable.
-                    # Effective GDPO weight: 2.0 * factor = [0.2, 2.0]
-                    unique_rate = n_unique / max(n_total_crit, 1)
-                    gold_disc_factor = 0.1 + 0.9 * unique_rate
-                    gold_disc *= gold_disc_factor
+                    # Apply global monotonic gold_disc factor (updated at end of step)
+                    gold_disc *= self._gold_disc_factor
 
                     # ── Calibration penalty: penalise binary (0/10) score distributions ──
                     calibration_penalty = 0.0
@@ -810,7 +809,7 @@ class MetaRewardFunction:
                         "disc": disc_reward,
                         "qa": qa,
                         "gold_disc": gold_disc,
-                        "gold_disc_factor": gold_disc_factor,
+                        "gold_disc_factor": self._gold_disc_factor,
                         "calibration": calibration_penalty,
                         "parrot": parrot_penalty,
                         "parrot_flagged": q_parrot.get(j, False),
@@ -857,6 +856,27 @@ class MetaRewardFunction:
                 progress["q_done"] += 1
 
             print(f"[MetaReward]   Q{q_idx+1}/{len(q_items)} done")
+
+        # ── Update gold_disc factor (monotonically increasing) ─────────
+        # Collect unique rates from all rollouts in this step
+        step_unique_rates = []
+        for q_idx, rd_map in all_rollout_details.items():
+            for j, rd in rd_map.items():
+                nt = rd.get("n_total", 1)
+                nu = rd.get("n_unique", 0)
+                if nt > 0:
+                    step_unique_rates.append(nu / nt)
+        if step_unique_rates:
+            batch_unique_rate = float(np.mean(step_unique_rates))
+            # EMA with alpha=0.1 for slow smoothing
+            self._gold_disc_ema = 0.9 * self._gold_disc_ema + 0.1 * batch_unique_rate
+            # Monotonic: only increase, never decrease
+            new_factor = 0.1 + 0.9 * self._gold_disc_ema
+            if new_factor > self._gold_disc_factor:
+                self._gold_disc_factor = new_factor
+            print(f"[MetaReward] gold_disc schedule: batch_uniq={batch_unique_rate:.3f} "
+                  f"ema={self._gold_disc_ema:.3f} factor={self._gold_disc_factor:.3f} "
+                  f"eff_weight={2.0 * self._gold_disc_factor:.3f}")
 
         # ── Cleanup ────────────────────────────────────────────────────
         solver_pool.shutdown(wait=False)
