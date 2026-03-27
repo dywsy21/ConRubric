@@ -44,6 +44,11 @@ class RubricQualityConfig:
     # This punishes format drift strongly.
     lambda_malformed: float = float(os.getenv("GRM_LAMBDA_MALFORMED", "2.0"))
 
+    # Double-tag penalty: penalize criteria with duplicated sign tags like
+    # "[+] [+] text" or "[+] [-] text" — a format corruption pattern.
+    # Heavy penalty to immediately suppress this degeneration.
+    lambda_double_tag: float = float(os.getenv("GRM_LAMBDA_DOUBLE_TAG", "5.0"))
+
     # Whether to enable quality scoring at all (master switch)
     enabled: bool = os.getenv("GRM_RUBRIC_QUALITY", "true").lower() in ("1", "true", "yes")
 
@@ -69,6 +74,12 @@ _CRITERION_RE = re.compile(
 # Used to penalize format drift. Matches optional bullet + bracket but invalid content.
 _MALFORMED_CRITERION_RE = re.compile(
     r"^\s*(?:[-*\u2013\u2014]\s*)?\[[^\]]*\]\s*.+$",
+)
+
+# Regex to detect double-tag corruption: "[+] [+] text", "[+] [-] text", etc.
+# This is a format degeneration where the model duplicates the sign bracket.
+_DOUBLE_TAG_RE = re.compile(
+    r"^\s*(?:[-*\u2013\u2014]\s*)?\[[+\-\u2013\u2014\d]*\]\s*\[[+\-\u2013\u2014\d]*\]",
 )
 
 
@@ -140,6 +151,20 @@ def count_malformed_criteria(rubric_text: str) -> int:
             if not _CRITERION_RE.match(line):
                 malformed += 1
     return malformed
+
+
+def count_double_tag_criteria(rubric_text: str) -> int:
+    """Count criteria lines with double-tag corruption like '[+] [+] text'.
+    
+    This is a degenerate format where the model duplicates sign brackets.
+    It technically parses (the second bracket becomes part of criterion text)
+    but is structurally wrong and must be penalized heavily.
+    """
+    count = 0
+    for line in rubric_text.splitlines():
+        if _DOUBLE_TAG_RE.match(line):
+            count += 1
+    return count
 
 
 # ── Quality Scoring ────────────────────────────────────────────────────────
@@ -215,10 +240,22 @@ def score_rubric_quality(
         malformed_penalty = 0.0
     detail["malformed_penalty"] = malformed_penalty
 
+    # ── 4. Double-tag penalty ──────────────────────────────────────────
+    # Heavily penalize double-tag corruption like "[+] [+] text".
+    # This format degeneration makes rubrics unusable and must be
+    # suppressed immediately. Penalty scales with fraction of corrupted lines.
+    n_double_tag = count_double_tag_criteria(rubric_text)
+    if n_double_tag > 0:
+        double_tag_ratio = n_double_tag / max(n, 1)
+        double_tag_penalty = -config.lambda_double_tag * double_tag_ratio
+    else:
+        double_tag_penalty = 0.0
+    detail["double_tag_penalty"] = double_tag_penalty
+
     n_pos = sum(1 for c in criteria if c.sign == "+")
     n_neg = sum(1 for c in criteria if c.sign == "-")
 
-    total = len_penalty + token_len_penalty + malformed_penalty
+    total = len_penalty + token_len_penalty + malformed_penalty + double_tag_penalty
 
     return RubricQualityResult(
         n_criteria=n,
