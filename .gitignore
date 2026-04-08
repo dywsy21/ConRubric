@@ -14,3 +14,14 @@ docs
 _*
 docs/benchmark_comparison_analysis.md
 *.bak2
+
+# latex
+
+*.aux
+*.bbl
+*.blg
+*.brf
+*.pdf
+*.log
+*.out
+*.synctex.gz
