@@ -28,11 +28,10 @@ set -a; source "$ROOT/.env"; set +a
 
 # ── Config ───────────────────────────────────────────────────────
 JUDGE_PORT="${JUDGE_PORT:-8202}"
-JUDGE_GPU="${JUDGE_GPU:-0}"
+JUDGE_GPU="${JUDGE_GPU:-1}"
 JUDGE_MODEL="${JUDGE_MODEL:-models/Qwen3.5-35B-A3B}"
 JUDGE_MODEL_NAME="${JUDGE_SERVED_NAME:-qwen3.5-35b-a3b}"
-JUDGE_MAX_LEN="${JUDGE_MAX_MODEL_LEN:-8192}"
-JUDGE_MEM="${JUDGE_GPU_MEM_UTIL:-0.9}"
+JUDGE_MEM="${JUDGE_GPU_MEM_UTIL:-0.85}"
 
 EXT_API_KEY="${EXT_API_KEY:-sk-Dk3063EgG7Lezr9BJ3nkpgtGsv89KR4CKrODFLB0lgqr0E4d}"
 export EXT_API_KEY
@@ -46,20 +45,21 @@ export ORACLE_API_BASE="http://localhost:${JUDGE_PORT}/v1"
 if curl -sf --max-time 3 "http://localhost:${JUDGE_PORT}/health" > /dev/null 2>&1; then
   echo "[launch] vLLM judge already running on port $JUDGE_PORT"
 else
-  echo "[launch] Starting vLLM judge on GPU $JUDGE_GPU, port $JUDGE_PORT..."
+  echo "[launch] Starting SGLang judge on GPU $JUDGE_GPU, port $JUDGE_PORT..."
 
-  CUDA_VISIBLE_DEVICES="$JUDGE_GPU" python -m vllm.entrypoints.openai.api_server \
-    --model "$JUDGE_MODEL" \
-    --served-model-name "$JUDGE_MODEL_NAME" \
+  SGLANG_DISABLE_CUDNN_CHECK=1 CUDA_VISIBLE_DEVICES="$JUDGE_GPU" python -m sglang.launch_server \
+    --model-path "$JUDGE_MODEL" \
     --port "$JUDGE_PORT" \
-    --max-model-len "$JUDGE_MAX_LEN" \
-    --gpu-memory-utilization "$JUDGE_MEM" \
-    --dtype bfloat16 \
+    --tp-size 1 \
+    --mem-fraction-static "$JUDGE_MEM" \
+    --context-length 16384 \
+    --served-model-name "$JUDGE_MODEL_NAME" \
     --trust-remote-code \
-    > "$ROOT/vllm-judge.log" 2>&1 &
+    --attention-backend triton \
+    > "$ROOT/sglang-judge.log" 2>&1 &
 
-  VLLM_PID=$!
-  echo "[launch] vLLM judge PID=$VLLM_PID (log: $ROOT/vllm-judge.log)"
+  JUDGE_PID=$!
+  echo "[launch] SGLang judge PID=$JUDGE_PID (log: $ROOT/sglang-judge.log)"
 
   # Wait up to 5 minutes for vLLM to be ready
   echo "[launch] Waiting for vLLM to be ready..."
@@ -68,9 +68,9 @@ else
       echo "[launch] vLLM judge ready after ${i}×5s"
       break
     fi
-    if ! kill -0 $VLLM_PID 2>/dev/null; then
-      echo "[launch] ERROR: vLLM process died! Last 20 lines of log:"
-      tail -20 "$ROOT/vllm-judge.log"
+    if ! kill -0 $JUDGE_PID 2>/dev/null; then
+      echo "[launch] ERROR: SGLang process died! Last 20 lines of log:"
+      tail -20 "$ROOT/sglang-judge.log"
       exit 1
     fi
     echo "[launch] Waiting... (${i}/60)"
