@@ -78,6 +78,13 @@ GEN_TEMPERATURE = float(os.getenv("GEN_TEMPERATURE", "0.7"))
 GEN_WORKERS     = int(os.getenv("GEN_WORKERS", "20"))  # per model
 JUDGE_WORKERS   = int(os.getenv("JUDGE_WORKERS", "50"))
 
+# Reasoning models need much larger max_tokens (budget includes hidden reasoning tokens)
+# Without this, the model exhausts tokens on reasoning and returns empty content.
+MODEL_MAX_TOKENS: Dict[str, int] = {
+    "gpt-5":    16384,  # reasoning model: o-series style
+    "grok-4":   16384,  # reasoning model
+}
+
 OUTPUT_BASE = "out/bench/api_models"
 
 
@@ -141,19 +148,31 @@ def _generate_one(client: OpenAI, model: str, question: str,
                   retries: int = 3) -> str:
     """Generate a single rubric; accumulates token counts."""
     prompt = RUBRIC_GENERATION_PROMPT.format(question=question)
+    max_tokens = MODEL_MAX_TOKENS.get(model, GEN_MAX_TOKENS)
     last_err = None
     for attempt in range(retries):
         try:
             resp = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=GEN_MAX_TOKENS,
+                max_tokens=max_tokens,
                 temperature=GEN_TEMPERATURE,
             )
             if resp.usage:
                 usage_in.append(resp.usage.prompt_tokens)
                 usage_out.append(resp.usage.completion_tokens)
-            return resp.choices[0].message.content or ""
+            content = resp.choices[0].message.content or ""
+            if not content.strip():
+                # Reasoning models may return empty if max_tokens too small
+                reason = getattr(resp.choices[0], 'finish_reason', '?')
+                print(f"  [{model}] empty response (finish_reason={reason}, "
+                      f"reasoning_tokens={getattr(getattr(resp.usage, 'completion_tokens_details', None), 'reasoning_tokens', '?')})"
+                      f"; attempt {attempt+1}/{retries}")
+                if attempt < retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                return ""
+            return content
         except Exception as e:
             last_err = e
             wait = 2 ** attempt
