@@ -48,11 +48,6 @@ if curl -sf --max-time 3 "http://localhost:${JUDGE_PORT}/health" > /dev/null 2>&
 else
   echo "[launch] Starting vLLM judge on GPU $JUDGE_GPU, port $JUDGE_PORT..."
 
-  LANG_ONLY_ARG=""
-  if [[ "${JUDGE_LANG_ONLY:-1}" == "1" ]]; then
-    LANG_ONLY_ARG="--language-model-only"
-  fi
-
   CUDA_VISIBLE_DEVICES="$JUDGE_GPU" python -m vllm.entrypoints.openai.api_server \
     --model "$JUDGE_MODEL" \
     --served-model-name "$JUDGE_MODEL_NAME" \
@@ -60,7 +55,6 @@ else
     --max-model-len "$JUDGE_MAX_LEN" \
     --gpu-memory-utilization "$JUDGE_MEM" \
     --dtype bfloat16 \
-    $LANG_ONLY_ARG \
     > "$ROOT/vllm-judge.log" 2>&1 &
 
   VLLM_PID=$!
