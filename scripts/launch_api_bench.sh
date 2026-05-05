@@ -28,7 +28,7 @@ set -a; source "$ROOT/.env"; set +a
 
 # ── Config ───────────────────────────────────────────────────────
 JUDGE_PORT="${JUDGE_PORT:-8202}"
-JUDGE_GPU="${JUDGE_GPU:-1}"
+JUDGE_GPU="${JUDGE_GPU:-0}"
 JUDGE_MODEL="${JUDGE_MODEL:-models/Qwen3.5-35B-A3B}"
 JUDGE_MODEL_NAME="${JUDGE_SERVED_NAME:-qwen3.5-35b-a3b}"
 JUDGE_MEM="${JUDGE_GPU_MEM_UTIL:-0.85}"
