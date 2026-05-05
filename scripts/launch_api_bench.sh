@@ -55,6 +55,7 @@ else
     --max-model-len "$JUDGE_MAX_LEN" \
     --gpu-memory-utilization "$JUDGE_MEM" \
     --dtype bfloat16 \
+    --trust-remote-code \
     > "$ROOT/vllm-judge.log" 2>&1 &
 
   VLLM_PID=$!
