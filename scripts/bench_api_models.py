@@ -81,8 +81,7 @@ JUDGE_WORKERS   = int(os.getenv("JUDGE_WORKERS", "50"))
 # Reasoning models need much larger max_tokens (budget includes hidden reasoning tokens)
 # Without this, the model exhausts tokens on reasoning and returns empty content.
 MODEL_MAX_TOKENS: Dict[str, int] = {
-    "gpt-5":    16384,  # reasoning model: o-series style
-    "grok-4":   16384,  # reasoning model
+    "gpt-5": 16384,  # reasoning model: o-series style (all budget consumed by reasoning tokens)
 }
 
 OUTPUT_BASE = "out/bench/api_models"
