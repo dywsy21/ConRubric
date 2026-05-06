@@ -42,6 +42,7 @@ echo "[vllm-judge] max_model_len=$MAX_MODEL_LEN  gpu_memory_utilization=$GPU_MEM
 EXTRA_ARGS=()
 # --language-model-only was removed in vLLM 0.7+; skip it
 
+cd "$ROOT_DIR"
 CUDA_VISIBLE_DEVICES="$GPU" python -m vllm.entrypoints.openai.api_server \
   --model "$MODEL" \
   --served-model-name "$MODEL_NAME" \
