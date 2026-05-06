@@ -55,6 +55,7 @@ MODELS = [
     "gemini-3.1-pro-preview",
     "claude-opus-4-7",
     "grok-4",
+    "glm-5",
 ]
 
 # Approximate cost per 1M tokens (input, output) in USD
@@ -65,6 +66,7 @@ PRICE_PER_1M = {
     "gemini-3.1-pro-preview":(7.0,   21.0),
     "claude-opus-4-7":       (15.0,  75.0),
     "grok-4":                (3.0,   15.0),
+    "glm-5":                 (2.0,    6.0),
 }
 
 # External API (rubric generation)
@@ -82,6 +84,7 @@ JUDGE_WORKERS   = int(os.getenv("JUDGE_WORKERS", "50"))
 # Without this, the model exhausts tokens on reasoning and returns empty content.
 MODEL_MAX_TOKENS: Dict[str, int] = {
     "gpt-5": 16384,  # reasoning model: o-series style (all budget consumed by reasoning tokens)
+    "glm-5": 4096,   # GLM-5 supports thinking mode; needs extra token budget
 }
 
 OUTPUT_BASE = "out/bench/api_models"
