@@ -28,7 +28,7 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
 fi
 
 # Configurable via env
-GPU="${JUDGE_GPU:-1}"
+GPU="${JUDGE_GPU:-0}"
 PORT="${JUDGE_PORT:-8202}"
 MODEL="${JUDGE_MODEL:-models/Qwen3.5-35B-A3B}"
 MODEL_NAME="${JUDGE_SERVED_NAME:-qwen3.5-35b-a3b}"
