@@ -41,6 +41,9 @@ echo "[vllm-judge] max_model_len=$MAX_MODEL_LEN  gpu_memory_utilization=$GPU_MEM
 
 EXTRA_ARGS=()
 # --language-model-only was removed in vLLM 0.7+; skip it
+# Qwen3.5-35B-A3B declares Qwen3_5MoeForConditionalGeneration but we use text-only;
+# override to the vLLM-supported Qwen3MoeForCausalLM architecture
+EXTRA_ARGS+=(--hf-overrides '{"architectures": ["Qwen3MoeForCausalLM"]}')
 
 cd "$ROOT_DIR"
 CUDA_VISIBLE_DEVICES="$GPU" python -m vllm.entrypoints.openai.api_server \
