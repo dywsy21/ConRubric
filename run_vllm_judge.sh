@@ -40,9 +40,7 @@ echo "[vllm-judge] GPU=$GPU  PORT=$PORT  MODEL=$MODEL  NAME=$MODEL_NAME"
 echo "[vllm-judge] max_model_len=$MAX_MODEL_LEN  gpu_memory_utilization=$GPU_MEM_UTIL  lang_only=$LANG_ONLY"
 
 EXTRA_ARGS=()
-if [[ "$LANG_ONLY" == "1" ]]; then
-  EXTRA_ARGS+=(--language-model-only)
-fi
+# --language-model-only was removed in vLLM 0.7+; skip it
 
 CUDA_VISIBLE_DEVICES="$GPU" python -m vllm.entrypoints.openai.api_server \
   --model "$MODEL" \
