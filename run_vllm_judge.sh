@@ -30,8 +30,8 @@ fi
 # Configurable via env
 GPU="${JUDGE_GPU:-0}"
 PORT="${JUDGE_PORT:-8202}"
-MODEL="${JUDGE_MODEL:-models/Qwen3.5-35B-A3B}"
-MODEL_NAME="${JUDGE_SERVED_NAME:-qwen3.5-35b-a3b}"
+MODEL="${JUDGE_MODEL:-models/Qwen3-8B}"
+MODEL_NAME="${JUDGE_SERVED_NAME:-qwen3-8b}"
 MAX_MODEL_LEN="${JUDGE_MAX_MODEL_LEN:-8192}"
 GPU_MEM_UTIL="${JUDGE_GPU_MEM_UTIL:-0.9}"
 LANG_ONLY="${JUDGE_LANG_ONLY:-1}"  # Qwen3.5 is multimodal; use --language-model-only for text
@@ -40,10 +40,7 @@ echo "[vllm-judge] GPU=$GPU  PORT=$PORT  MODEL=$MODEL  NAME=$MODEL_NAME"
 echo "[vllm-judge] max_model_len=$MAX_MODEL_LEN  gpu_memory_utilization=$GPU_MEM_UTIL  lang_only=$LANG_ONLY"
 
 EXTRA_ARGS=()
-# Qwen3.5-35B-A3B declares Qwen3_5MoeForConditionalGeneration; use generic
-# TransformersForCausalLM with trust-remote-code for compatibility
-EXTRA_ARGS+=(--trust-remote-code)
-EXTRA_ARGS+=(--hf-overrides '{"architectures": ["TransformersForCausalLM"]}')
+# Qwen3-8B is used as judge (text-only, fully supported by vLLM)
 
 cd "$ROOT_DIR"
 CUDA_VISIBLE_DEVICES="$GPU" python -m vllm.entrypoints.openai.api_server \
