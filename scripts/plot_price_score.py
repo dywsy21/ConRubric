@@ -39,15 +39,6 @@ KNOWN_MODELS = {
         "label":  "Base Qwen3-8B",
         "zorder": 5,
     },
-    "GLM-5\n(~130B)": {
-        "kendall_tau_b": 0.233,
-        "pairwise_acc":  0.618,
-        "cost_usd":      0.5,   # rough estimate for 709 prompts via API
-        "marker": "s",
-        "color":  "#2a9d8f",
-        "label":  "GLM-5 (~130B)",
-        "zorder": 5,
-    },
 }
 
 # Approximate per-1M pricing for API models
@@ -97,7 +88,7 @@ def compute_cost(usage: dict, model: str) -> float:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--results", default="out/bench/api_models/all_results_summary.json")
+    parser.add_argument("--results", default="out/bench/api_models/all_results_combined.json")
     parser.add_argument("--out", default="out/bench/api_models/price_score.pdf")
     parser.add_argument("--metric", default="kendall_tau_b",
                         choices=["kendall_tau_b", "pairwise_acc", "avg_spearman"])
@@ -135,7 +126,7 @@ def main():
         ax.scatter(cost, y, s=120, color=color, marker="D", zorder=6,
                    edgecolors="white", linewidths=0.8)
         ax.annotate(display, (cost, y), textcoords="offset points",
-                    xytext=(8, 4), fontsize=9, color=color)
+                    xytext=(-60, 4) if cost > 50 else (8, 4), fontsize=9, color=color)
         legend_handles.append(
             mpatches.Patch(color=color, label=display)
         )
@@ -189,8 +180,9 @@ def main():
     ax.grid(True, alpha=0.3, linestyle="--")
     ax.legend(handles=legend_handles, fontsize=8, loc="lower right", framealpha=0.9)
 
-    # Highlight MetaRM-GRM region
-    ax.axhline(y=0.270, color="#e63946", linestyle=":", alpha=0.4, linewidth=1)
+    # Highlight MetaRM-GRM threshold
+    grm_y = KNOWN_MODELS["MetaRM-GRM\n(Ours)"].get(args.metric, KNOWN_MODELS["MetaRM-GRM\n(Ours)"]["kendall_tau_b"])
+    ax.axhline(y=grm_y, color="#e63946", linestyle=":", alpha=0.4, linewidth=1)
 
     plt.tight_layout()
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
@@ -201,7 +193,7 @@ def main():
     png_out = args.out.replace(".pdf", ".png")
     plt.savefig(png_out, dpi=150, bbox_inches="tight")
     print(f"Saved: {png_out}")
-    plt.show()
+    # plt.show()  # disabled for headless environments
 
 
 if __name__ == "__main__":
