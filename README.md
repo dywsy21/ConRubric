@@ -1,6 +1,8 @@
 # ConRubric: Training Rubric-Generating Reward Models via Cross-Rubric Consensus Reinforcement Learning
 
-This project implements the training of a General Reward Model (GRM) using Meta-Reward and Bi-level optimization.
+This project implements **ConRubric**, a framework for training rubric-generating reward models.
+The trainable model, **ConRubric-GRM**, generates structured natural-language rubrics that a frozen LLM-as-a-Judge applies to score candidate answers.
+Training uses cross-rubric consensus across same-prompt rubric rollouts, with discrimination and gold-answer anchoring to reduce vacuous agreement.
 
 `verl` is vendored in-repo at `./verl`. It is effectively a forked and modified version.
 
