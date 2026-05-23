@@ -1,4 +1,4 @@
-# Meta-Reward GRM
+# ConRubric: Training Rubric-Generating Reward Models via Cross-Rubric Consensus Reinforcement Learning
 
 This project implements the training of a General Reward Model (GRM) using Meta-Reward and Bi-level optimization.
 
