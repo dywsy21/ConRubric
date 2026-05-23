@@ -17,6 +17,8 @@ docs/benchmark_comparison_analysis.md
 
 # latex
 
+/paper/
+
 *.aux
 *.bbl
 *.blg
