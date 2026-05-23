@@ -1,4 +1,4 @@
-"""Plot cost-performance chart comparing frontier API models vs MetaRM-GRM.
+"""Plot cost-performance chart comparing frontier API models vs ConRubric-GRM.
 
 The plotted performance metric is Kendall tau-b on the discriminative
 HealthBench subset used in the paper. This is the headline metric because the
